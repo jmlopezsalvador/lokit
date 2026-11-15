@@ -10,6 +10,7 @@ import com.lokit.ui.Zone
 import com.lokit.ui.FeedbackStyle
 import com.lokit.ui.BgMode
 import com.lokit.ui.MaskKind
+import com.lokit.ui.ScreenId
 import com.lokit.ui.MaskStyle
 import com.lokit.ui.maskLines
 import com.lokit.ui.hitKey
@@ -122,33 +123,59 @@ class SettingsStoreTest {
         assertEquals(listOf("12:30 PM"), maskLines(MaskKind.TIME_12_AMPM, LocalDateTime(2026, 11, 15, 12, 30, 0, 0)))
     }
 
-    @Test fun padHasMasksAndOldStylesStillDecode() {
-        assertEquals(3, Specs.masksFor(com.lokit.ui.ScreenId.PAD).size)
-        assertTrue(Specs.forScreen(com.lokit.ui.ScreenId.PAD).containsAll(Specs.padMasks))
-        // formato antiguo (6 campos, sin grosor)
-        assertEquals(MaskStyle(MaskKind.DATE, 1L, BgMode.NONE, 2L, 1f, 1, 0), MaskStyle.decode("DATE|1|NONE|2|1.0|1"))
+    @Test fun dateFormats() {
+        val t = LocalDateTime(2026, 11, 15, 5, 3, 0, 0)
+        assertEquals(listOf("15 nov"), maskLines(MaskKind.DATE_SHORT, t))
+        assertEquals(listOf("domingo, 15 de noviembre"), maskLines(MaskKind.DATE_LONG, t))
+    }
+
+    @Test fun oldStylesStillDecode() {
+        // formato antiguo (6 campos): el factor pasa a tamaño absoluto
+        val old = MaskStyle.decode("DATE|1|NONE|2|1.0|1")!!
+        assertEquals(MaskKind.DATE.defaultSize, old.size)
+        assertEquals(0, old.weight)
         assertEquals(2, MaskStyle.decode(MaskStyle(weight = 2).encode())!!.weight)
     }
 
     @Test fun maskStyleCodec() {
-        val m = MaskStyle(MaskKind.DATE, 0xFF112233L, BgMode.SOLID, 0xFFAABBCCL, 0.8f, 2)
+        val m = MaskStyle(MaskKind.DATE, 0xFF112233L, BgMode.SOLID, 0xFFAABBCCL, 0.04f, 2, 1, 0.2f, 3)
         assertEquals(m, MaskStyle.decode(m.encode()))
         assertNull(MaskStyle.decode("basura"))
         assertNull(MaskStyle.decode(null))
     }
 
-    @Test fun masksAreOffByDefaultAndPersist() {
-        val spec = Specs.lockMasks.first()
-        assertNull(AppSettings().box(spec))
+    @Test fun masksAddUpdateRemoveAndPersist() {
         val store = SettingsStore(MemoryStore())
-        val style = MaskStyle(MaskKind.TIME, 0xFF000000L, BgMode.AUTO, 0xFF000000L, 1.2f, 0)
-        val s = AppSettings().withBox(spec.key, Zone(0.1f, 0.3f, 0.8f, 0.2f)).withMask(spec.key, style)
-        store.save(s)
+        assertTrue(AppSettings().masksOf(ScreenId.LOCK).isEmpty())
+        val st1 = MaskStyle(MaskKind.TIME_12, 0xFF000000L, BgMode.AUTO, 0xFF000000L, 0.03f, 0)
+        val (s1, a) = AppSettings().addMask(ScreenId.LOCK, Zone(0.1f, 0.3f, 0.8f, 0.2f), st1)
+        val (s2, b) = s1.addMask(ScreenId.LOCK, Zone(0.2f, 0.1f, 0.3f, 0.05f), MaskStyle(MaskKind.DATE_LONG))
+        assertEquals(listOf(1, 2), listOf(a.id, b.id))
+        val s3 = s2.updateMask(ScreenId.LOCK, b.copy(zone = Zone(0f, 0f, 0.5f, 0.1f)))
+        store.save(s3)
         val back = store.load()
-        assertEquals(Zone(0.1f, 0.3f, 0.8f, 0.2f), back.box(spec))
-        assertEquals(style, back.mask(spec))
-        // Restablecer vuelve al estilo por defecto
-        assertEquals(spec.maskDefault, back.resetBox(spec.key).mask(spec))
+        assertEquals(s3.masksOf(ScreenId.LOCK), back.masksOf(ScreenId.LOCK))
+        assertEquals(st1, back.masksOf(ScreenId.LOCK).first().style)
+        assertTrue(back.masksOf(ScreenId.HOME).isEmpty())
+        // quitar la primera no reutiliza su id
+        val s4 = back.removeMask(ScreenId.LOCK, a.id)
+        assertEquals(listOf(2), s4.masksOf(ScreenId.LOCK).map { it.id })
+        assertEquals(3, s4.addMask(ScreenId.LOCK, Zone(0f, 0f, 0.1f, 0.1f), MaskStyle()).second.id)
+        store.save(s4)
+        assertEquals(1, store.load().masksOf(ScreenId.LOCK).size)
+    }
+
+    @Test fun legacyFixedMasksMigrate() {
+        val mem = MemoryStore()
+        mem.putString("box_lockMask1", Zone(0.1f, 0.2f, 0.3f, 0.4f).encode())
+        mem.putString("mask_lockMask1", "TIME|1|AUTO|2|1.0|1|0")
+        mem.putString("box_padMask2", "")
+        val back = SettingsStore(mem).load()
+        val lock = back.masksOf(ScreenId.LOCK)
+        assertEquals(1, lock.size)
+        assertEquals(Zone(0.1f, 0.2f, 0.3f, 0.4f), lock[0].zone)
+        assertEquals(MaskKind.TIME, lock[0].style.kind)
+        assertTrue(back.masksOf(ScreenId.PAD).isEmpty())
     }
 
     @Test fun newSettingsPersist() {

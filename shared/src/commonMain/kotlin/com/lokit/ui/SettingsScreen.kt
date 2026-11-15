@@ -27,6 +27,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -230,10 +231,17 @@ private val tints = listOf(
 
 private val aligns = listOf("Izquierda", "Centro", "Derecha")
 private val weights = listOf("Fina", "Normal", "Negrita")
+private val fontNames = listOf("Sistema", "Serif", "Monoespaciada", "Cursiva")
+private val maskColors = listOf(Color(0xFFBA68C8), Color(0xFFFF8A65), Color(0xFF4DB6AC), Color(0xFFFFD54F))
+
+private fun sizePct(v: Float) = "${(v * 1000).roundToInt() / 10f} %"
+
+/** Una caja editable: caja fija (spec) o máscara añadida por el usuario. */
+private class Ent(val key: String, val zone: Zone, val tag: String, val color: Color)
 
 /**
- * Editor de cajas invisibles sobre la captura: arrastrar para mover, esquina inferior derecha para redimensionar.
- * Según la caja elegida, el panel configura también su máscara, los puntos del PIN, el PIN revelado o el resalte.
+ * Editor de cajas invisibles sobre la captura: tocar una caja para seleccionarla, arrastrar para moverla y la esquina
+ * inferior derecha para redimensionarla. Las máscaras de hora/fecha se añaden y se quitan libremente.
  */
 @Composable
 private fun BoxEditor(
@@ -252,23 +260,44 @@ private fun BoxEditor(
     val feedback = remember { KeyFeedback() }
     val measurer = rememberTextMeasurer()
     val now = rememberNow()
-    val spec = specs.first { it.key == selected }
+    val masks = if (screenId != null) current.masksOf(screenId) else emptyList()
+    val selMask = masks.firstOrNull { "m${it.id}" == selected }
+    val spec = specs.firstOrNull { it.key == selected } ?: if (selMask == null) specs.first() else null
     val isPad = screenId == ScreenId.PAD
     val white = Color.White
+
+    fun ents(): List<Ent> {
+        val out = ArrayList<Ent>()
+        specs.forEachIndexed { i, sp -> current.box(sp)?.let { out += Ent(sp.key, it, sp.tag, boxColors[i % boxColors.size]) } }
+        if (screenId != null) {
+            current.masksOf(screenId).forEachIndexed { i, m ->
+                out += Ent("m${m.id}", m.zone, if (m.style.kind.date) "Fecha" else "Hora", maskColors[i % maskColors.size])
+            }
+        }
+        return out
+    }
+
+    fun setZone(key: String, z: Zone) {
+        current = if (key.startsWith("m") && screenId != null) {
+            val m = current.masksOf(screenId).first { "m${it.id}" == key }
+            current.updateMask(screenId, m.copy(zone = z))
+        } else current.withBox(key, z)
+    }
+
+    fun updMask(f: (MaskStyle) -> MaskStyle) {
+        val m = selMask ?: return
+        current = current.updateMask(screenId!!, m.copy(style = f(m.style)))
+    }
 
     Box(Modifier.fillMaxSize().background(Color(0xFF222222))) {
         if (image != null) Image(image, null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
 
-        // Vista previa real de las máscaras de hora/fecha y de los puntos del PIN.
+        // Vista previa real de las máscaras de hora/fecha, los puntos del PIN y el número revelado.
         if (!testing) {
-            for (sp in screenId?.let { Specs.masksFor(it) } ?: emptyList()) {
-                val z = current.box(sp) ?: continue
-                val st = current.mask(sp)
-                MaskLayer(z, st, image, maskLines(st.kind, now))
-            }
+            for (m in masks) key(m.id) { MaskLayer(m.zone, m.style, image, maskLines(m.style.kind, now), debounceMs = 150L) }
             if (isPad) {
                 current.box(Specs.padDots)?.let { z ->
-                    MaskLayer(z, current.mask(Specs.padDots), image, null)
+                    MaskLayer(z, current.mask(Specs.padDots), image, null, debounceMs = 150L)
                     Canvas(Modifier.fillMaxSize()) { drawPinDots(z, current, 3, 0f) }
                 }
             }
@@ -279,60 +308,71 @@ private fun BoxEditor(
         }
 
         Canvas(
-            Modifier.fillMaxSize().pointerInput(testing) {
-                if (testing) {
-                    // Modo prueba: tocar una tecla enseña el resalte tal y como se verá.
-                    detectTapGestures(onPress = { o ->
-                        val key = hitKey(current, o.x / size.width, o.y / size.height)
-                        if (key != null) feedback.run(current, key.second) { tryAwaitRelease() }
-                    })
-                } else {
-                    var mode = 0 // 0 nada, 1 mover, 2 redimensionar
-                    detectDragGestures(
-                        onDragStart = { o ->
-                            val sel = current.box(specs.first { it.key == selected })
+            Modifier.fillMaxSize()
+                .pointerInput(testing) {
+                    // Un toque selecciona la caja más pequeña que haya bajo el dedo (así se alcanzan las que están encima de otras).
+                    if (!testing) {
+                        detectTapGestures(onTap = { o ->
                             val nx = o.x / size.width
                             val ny = o.y / size.height
-                            mode = when {
-                                sel != null && abs(o.x - (sel.x + sel.w) * size.width) < 72f &&
-                                    abs(o.y - (sel.y + sel.h) * size.height) < 72f -> 2
-                                sel != null && sel.contains(nx, ny) -> 1
-                                else -> {
-                                    val hit = specs.firstOrNull { current.box(it)?.contains(nx, ny) == true }
-                                    if (hit != null) { selected = hit.key; 1 } else 0
-                                }
-                            }
-                        },
-                        onDrag = { change, delta ->
-                            change.consume()
-                            val sp = specs.first { it.key == selected }
-                            val b = current.box(sp)
-                            if (b != null && mode != 0) {
-                                val dx = delta.x / size.width
-                                val dy = delta.y / size.height
-                                val nb = if (mode == 1) {
-                                    b.copy(x = (b.x + dx).coerceIn(0f, 1f - b.w), y = (b.y + dy).coerceIn(0f, 1f - b.h))
-                                } else {
-                                    b.copy(w = (b.w + dx).coerceIn(0.02f, 1f - b.x), h = (b.h + dy).coerceIn(0.02f, 1f - b.y))
-                                }
-                                current = current.withBox(sp.key, nb)
-                            }
-                        },
-                    )
+                            val hit = ents().filter { it.zone.contains(nx, ny) }.minByOrNull { it.zone.w * it.zone.h }
+                            if (hit != null) selected = hit.key
+                        })
+                    }
                 }
-            },
+                .pointerInput(testing) {
+                    if (testing) {
+                        // Modo prueba: tocar una tecla enseña el resalte tal y como se verá.
+                        detectTapGestures(onPress = { o ->
+                            val key = hitKey(current, o.x / size.width, o.y / size.height)
+                            if (key != null) feedback.run(current, key.second) { tryAwaitRelease() }
+                        })
+                    } else {
+                        var mode = 0 // 0 nada, 1 mover, 2 redimensionar
+                        detectDragGestures(
+                            onDragStart = { o ->
+                                val all = ents()
+                                val sel = all.firstOrNull { it.key == selected }?.zone
+                                val nx = o.x / size.width
+                                val ny = o.y / size.height
+                                mode = when {
+                                    sel != null && abs(o.x - (sel.x + sel.w) * size.width) < 72f &&
+                                        abs(o.y - (sel.y + sel.h) * size.height) < 72f -> 2
+                                    sel != null && sel.contains(nx, ny) -> 1
+                                    else -> {
+                                        val hit = all.filter { it.zone.contains(nx, ny) }.minByOrNull { it.zone.w * it.zone.h }
+                                        if (hit != null) { selected = hit.key; 1 } else 0
+                                    }
+                                }
+                            },
+                            onDrag = { change, delta ->
+                                change.consume()
+                                val b = ents().firstOrNull { it.key == selected }?.zone
+                                if (b != null && mode != 0) {
+                                    val dx = delta.x / size.width
+                                    val dy = delta.y / size.height
+                                    val nb = if (mode == 1) {
+                                        b.copy(x = (b.x + dx).coerceIn(0f, 1f - b.w), y = (b.y + dy).coerceIn(0f, 1f - b.h))
+                                    } else {
+                                        b.copy(w = (b.w + dx).coerceIn(0.02f, 1f - b.x), h = (b.h + dy).coerceIn(0.02f, 1f - b.y))
+                                    }
+                                    setZone(selected, nb)
+                                }
+                            },
+                        )
+                    }
+                },
         ) {
-            specs.forEachIndexed { i, sp ->
-                val b = current.box(sp) ?: return@forEachIndexed
-                val color = boxColors[i % boxColors.size]
-                val isSel = sp.key == selected && !testing
+            for (e in ents()) {
+                val b = e.zone
+                val isSel = e.key == selected && !testing
                 val topLeft = Offset(b.x * size.width, b.y * size.height)
                 val sz = Size(b.w * size.width, b.h * size.height)
                 if (!testing) {
-                    drawRect(color.copy(alpha = if (isSel) 0.30f else 0.12f), topLeft, sz)
-                    drawRect(color, topLeft, sz, style = Stroke(width = if (isSel) 5f else 2f))
-                    if (sp.tag.isNotEmpty()) {
-                        val layout = measurer.measure(sp.tag, TextStyle(color = Color.White, fontSize = 12.sp))
+                    drawRect(e.color.copy(alpha = if (isSel) 0.30f else 0.12f), topLeft, sz)
+                    drawRect(e.color, topLeft, sz, style = Stroke(width = if (isSel) 5f else 2f))
+                    if (e.tag.isNotEmpty()) {
+                        val layout = measurer.measure(e.tag, TextStyle(color = Color.White, fontSize = 12.sp))
                         drawText(
                             layout,
                             topLeft = Offset(
@@ -341,7 +381,7 @@ private fun BoxEditor(
                             ),
                         )
                     }
-                    if (isSel) drawCircle(color, 22f, Offset(topLeft.x + sz.width, topLeft.y + sz.height))
+                    if (isSel) drawCircle(e.color, 22f, Offset(topLeft.x + sz.width, topLeft.y + sz.height))
                 }
             }
             if (testing) feedback.draw(this, current)
@@ -359,83 +399,151 @@ private fun BoxEditor(
                     .heightIn(max = 380.dp).verticalScroll(rememberScrollState()).padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("Cajas de «$title»", fontSize = 14.sp, color = white)
+                Text("Cajas de «$title» (toca una caja para seleccionarla)", fontSize = 14.sp, color = white)
                 if (image == null) Text("Sin captura: las cajas se colocan sobre fondo gris.", fontSize = 11.sp, color = Color(0xFFFFB74D))
 
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     for (sp in specs) {
                         FilterChip(selected = sp.key == selected, onClick = { selected = sp.key; testing = false }, label = { Text(sp.label) })
                     }
-                }
-                Text(spec.help, fontSize = 11.sp, color = Color(0xFFB0B8C4))
-                if (spec.optional) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Switch(
-                            checked = current.box(spec) != null,
-                            onCheckedChange = { on ->
-                                current = current.withBox(spec.key, if (on) (spec.default ?: Zone(0.3f, 0.4f, 0.4f, 0.1f)) else null)
-                            },
+                    for (m in masks) {
+                        FilterChip(
+                            selected = "m${m.id}" == selected,
+                            onClick = { selected = "m${m.id}"; testing = false },
+                            label = { Text("▣ ${m.style.kind.label.substringBefore(" (")}") },
                         )
-                        Text("Activa", fontSize = 13.sp, color = white)
+                    }
+                    if (screenId != null) {
+                        OutlinedButton(onClick = {
+                            val (ns, item) = current.addMask(
+                                screenId, Zone(0.25f, 0.08f, 0.5f, 0.06f),
+                                MaskStyle(kind = MaskKind.TIME_NOZERO, weight = 1, size = MaskKind.TIME_NOZERO.defaultSize),
+                            )
+                            current = ns
+                            selected = "m${item.id}"
+                            testing = false
+                        }) { Text("＋ Añadir máscara") }
                     }
                 }
 
-                // Máscara (hora/fecha o puntos del PIN): fondo y, en hora/fecha, texto.
-                if (spec.maskDefault != null && current.box(spec) != null) {
-                    val st = current.mask(spec)
-                    val isDots = spec.key == Specs.padDots.key
-                    if (isDots) {
+                if (selMask != null) {
+                    val st = selMask.style
+                    Text(
+                        "Máscara de hora o fecha: tapa lo que trae la captura y dibuja el valor real. La caja marca dónde se coloca; " +
+                            "el tamaño del texto se cambia aquí abajo, no con la caja.",
+                        fontSize = 11.sp, color = Color(0xFFB0B8C4),
+                    )
+                    Text("Valor", fontSize = 12.sp, color = white)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for ((name, isDate) in listOf("Hora" to false, "Fecha" to true)) {
+                            FilterChip(
+                                selected = st.kind.date == isDate,
+                                onClick = {
+                                    if (st.kind.date != isDate) updMask {
+                                        val nk = if (isDate) MaskKind.DATE else MaskKind.TIME_NOZERO
+                                        it.copy(kind = nk, size = if (it.size == it.kind.defaultSize) nk.defaultSize else it.size)
+                                    }
+                                },
+                                label = { Text(name) },
+                            )
+                        }
+                    }
+                    Text("Formato", fontSize = 12.sp, color = white)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (k in MaskKind.entries.filter { it.date == st.kind.date }) {
+                            FilterChip(
+                                selected = st.kind == k,
+                                onClick = { updMask { it.copy(kind = k, size = if (it.size == it.kind.defaultSize) k.defaultSize else it.size) } },
+                                label = { Text(k.label) },
+                            )
+                        }
+                    }
+                    Text("Posición del texto en la caja", fontSize = 12.sp, color = white)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        aligns.forEachIndexed { i, name ->
+                            FilterChip(selected = st.align == i, onClick = { updMask { it.copy(align = i) } }, label = { Text(name) })
+                        }
+                    }
+                    Text("Tipo de letra y grosor", fontSize = 12.sp, color = white)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        fontNames.forEachIndexed { i, name ->
+                            FilterChip(selected = st.font == i, onClick = { updMask { it.copy(font = i) } }, label = { Text(name) })
+                        }
+                    }
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        weights.forEachIndexed { i, name ->
+                            FilterChip(selected = st.weight == i, onClick = { updMask { it.copy(weight = i) } }, label = { Text(name) })
+                        }
+                    }
+                    SliderRow("Tamaño del texto", st.size, 0.008f..0.16f, sizePct(st.size), { v -> updMask { it.copy(size = v) } }, white)
+                    SliderRow(
+                        "Separación entre caracteres", st.spacing, -0.1f..0.6f, "${(st.spacing * 100).roundToInt()} %",
+                        { v -> updMask { it.copy(spacing = v) } }, white,
+                    )
+                    Text("Color del texto", fontSize = 12.sp, color = white)
+                    ColorChips(Palette.text, st.textColor) { c -> updMask { it.copy(textColor = c) } }
+                    Text("Fondo de la máscara", fontSize = 12.sp, color = white)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (m in BgMode.entries) {
+                            FilterChip(selected = st.bgMode == m, onClick = { updMask { it.copy(bgMode = m) } }, label = { Text(m.label) })
+                        }
+                    }
+                    if (st.bgMode == BgMode.SOLID) ColorChips(Palette.bg, st.bgColor) { c -> updMask { it.copy(bgColor = c) } }
+                    if (st.bgMode == BgMode.AUTO) {
+                        Text(
+                            "Copia de la propia captura la zona vecina que mejor encaja (nítida, con la misma textura). Ajusta la caja para que cubra justo lo que quieres tapar.",
+                            fontSize = 11.sp, color = Color(0xFFB0B8C4),
+                        )
+                    }
+                }
+
+                if (spec != null) {
+                    Text(spec.help, fontSize = 11.sp, color = Color(0xFFB0B8C4))
+                    if (spec.optional) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Switch(
+                                checked = current.box(spec) != null,
+                                onCheckedChange = { on ->
+                                    current = current.withBox(spec.key, if (on) (spec.default ?: Zone(0.3f, 0.4f, 0.4f, 0.1f)) else null)
+                                },
+                            )
+                            Text("Activa", fontSize = 13.sp, color = white)
+                        }
+                    }
+
+                    // Puntos del PIN: tamaño, separación, borde y máscara.
+                    if (spec.maskDefault != null && current.box(spec) != null) {
+                        val st = current.mask(spec)
                         SliderRow("Tamaño de los círculos", current.dotSize, 0.2f..1.5f, pct(current.dotSize), { current = current.copy(dotSize = it) }, white)
                         SliderRow("Separación", current.dotGap, 0f..3f, pct(current.dotGap), { current = current.copy(dotGap = it) }, white)
                         SliderRow("Grosor del borde", current.dotBorder, 0.05f..1f, pct(current.dotBorder), { current = current.copy(dotBorder = it) }, white)
                         Text("Máscara: tapa lo que traiga la captura en esa zona (puntos o recuadro).", fontSize = 11.sp, color = Color(0xFFB0B8C4))
-                    } else {
-                        Text("Tipo", fontSize = 12.sp, color = white)
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            for (k in MaskKind.entries) {
-                                FilterChip(selected = st.kind == k, onClick = { current = current.withMask(spec.key, st.copy(kind = k)) }, label = { Text(k.label) })
+                            for (m in BgMode.entries) {
+                                FilterChip(
+                                    selected = st.bgMode == m,
+                                    onClick = { current = current.withMask(spec.key, st.copy(bgMode = m)) },
+                                    label = { Text(if (m == BgMode.NONE) "Sin máscara" else m.label) },
+                                )
                             }
                         }
-                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            aligns.forEachIndexed { i, name ->
-                                FilterChip(selected = st.align == i, onClick = { current = current.withMask(spec.key, st.copy(align = i)) }, label = { Text(name) })
-                            }
-                        }
-                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            weights.forEachIndexed { i, name ->
-                                FilterChip(selected = st.weight == i, onClick = { current = current.withMask(spec.key, st.copy(weight = i)) }, label = { Text(name) })
-                            }
-                        }
-                        Text("Color del texto", fontSize = 12.sp, color = white)
-                        ColorChips(Palette.text, st.textColor) { current = current.withMask(spec.key, st.copy(textColor = it)) }
-                        SliderRow("Tamaño del texto", st.fontScale, 0.3f..1.6f, pct(st.fontScale), { current = current.withMask(spec.key, st.copy(fontScale = it)) }, white)
-                    }
-                    Text(if (isDots) "Máscara" else "Fondo", fontSize = 12.sp, color = white)
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        for (m in BgMode.entries) {
-                            FilterChip(
-                                selected = st.bgMode == m,
-                                onClick = { current = current.withMask(spec.key, st.copy(bgMode = m)) },
-                                label = { Text(if (isDots && m == BgMode.NONE) "Sin máscara" else m.label) },
-                            )
+                        if (st.bgMode == BgMode.SOLID) {
+                            ColorChips(Palette.bg, st.bgColor) { current = current.withMask(spec.key, st.copy(bgColor = it)) }
                         }
                     }
-                    if (st.bgMode == BgMode.SOLID) {
-                        ColorChips(Palette.bg, st.bgColor) { current = current.withMask(spec.key, st.copy(bgColor = it)) }
-                    }
-                }
 
-                // PIN revelado: opacidad del fondo y color del número.
-                if (spec.key == Specs.homeRevealView.key) {
-                    SliderRow("Opacidad del fondo", current.revealBgAlpha, 0f..1f, pct(current.revealBgAlpha), { current = current.copy(revealBgAlpha = it) }, white)
-                    Text("Color del número", fontSize = 12.sp, color = white)
-                    ColorChips(Palette.text, current.revealColor) { current = current.copy(revealColor = it) }
+                    // PIN revelado: opacidad del fondo y color del número.
+                    if (spec.key == Specs.homeRevealView.key) {
+                        SliderRow("Opacidad del fondo", current.revealBgAlpha, 0f..1f, pct(current.revealBgAlpha), { current = current.copy(revealBgAlpha = it) }, white)
+                        Text("Color del número", fontSize = 12.sp, color = white)
+                        ColorChips(Palette.text, current.revealColor) { current = current.copy(revealColor = it) }
+                    }
                 }
 
                 if (isPad) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = {
-                            val b = current.box(spec)
+                            val b = spec?.let { current.box(it) }
                             if (b != null && Specs.hitOf(spec) != null) {
                                 // Copia el tamaño de la tecla elegida a todas las demás, manteniendo su posición.
                                 var s = current
@@ -477,7 +585,14 @@ private fun BoxEditor(
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { onDone(current) }) { Text("Guardar") }
                     OutlinedButton(onClick = { onDone(null) }) { Text("Cancelar") }
-                    OutlinedButton(onClick = { current = current.resetBox(spec.key) }) { Text("Restablecer caja") }
+                    if (selMask != null) {
+                        OutlinedButton(onClick = {
+                            current = current.removeMask(screenId!!, selMask.id)
+                            selected = specs.first().key
+                        }) { Text("Eliminar máscara") }
+                    } else if (spec != null) {
+                        OutlinedButton(onClick = { current = current.resetBox(spec.key) }) { Text("Restablecer caja") }
+                    }
                     OutlinedButton(onClick = { panelTop = !panelTop }) { Text(if (panelTop) "Panel abajo" else "Panel arriba") }
                     OutlinedButton(onClick = { panelHidden = true }) { Text("Ocultar panel") }
                 }

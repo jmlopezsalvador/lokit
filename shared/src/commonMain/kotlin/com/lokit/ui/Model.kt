@@ -24,52 +24,80 @@ enum class ScreenId(val title: String, val file: String) {
     HOME("Escritorio", "home.img"),
 }
 
-/** Qué se dibuja en una máscara de hora/fecha. */
-enum class MaskKind(val label: String) {
+/** Qué se dibuja en una máscara: una hora o una fecha, con su formato. */
+enum class MaskKind(val label: String, val date: Boolean = false) {
     TIME("Hora 24 h (05:53)"),
     TIME_NOZERO("Hora 24 h sin cero (5:53)"),
     TIME_12("Hora 12 h (5:53)"),
     TIME_12_AMPM("Hora 12 h con AM/PM (5:53 PM)"),
-    TIME_STACKED("Hora en dos líneas"),
-    DATE("Fecha (dom, 15 nov)"),
+    TIME_STACKED("Hora vertical (dos líneas)"),
+    DATE("Fecha (dom, 15 nov)", true),
+    DATE_SHORT("Fecha corta (15 nov)", true),
+    DATE_LONG("Fecha larga (domingo, 15 de noviembre)", true);
+
+    /** Tamaño de letra por defecto, como fracción de la altura de la pantalla. */
+    val defaultSize: Float get() = if (this == TIME_STACKED) 0.085f else 0.022f
 }
 
 /** Fondo de una máscara: con qué se tapa lo que trae la captura. */
 enum class BgMode(val label: String) {
-    NONE("Sin fondo"),
-    AUTO("Automático (de la captura)"),
+    NONE("Transparente"),
+    AUTO("Imagen (copia del entorno)"),
+    SMOOTH("Degradado de los bordes"),
     SOLID("Color sólido"),
 }
 
 /**
  * Aspecto de una máscara. Las de hora/fecha usan todo; la de los puntos del PIN solo usa el fondo.
- * `align`: 0 izquierda, 1 centro, 2 derecha. `fontScale` multiplica el tamaño de texto que cabe en la caja.
- * `weight`: 0 fina, 1 normal, 2 negrita.
+ * El texto NO depende del tamaño de la caja: `size` es la altura de la letra como fracción de la altura de la
+ * pantalla; la caja solo marca dónde se alinea. `align`: 0 izquierda, 1 centro, 2 derecha.
+ * `weight`: 0 fina, 1 normal, 2 negrita. `spacing`: separación entre caracteres (em). `font`: 0 sistema, 1 serif, 2 mono, 3 cursiva.
  */
 data class MaskStyle(
     val kind: MaskKind = MaskKind.TIME,
     val textColor: Long = 0xFFFFFFFFL,
     val bgMode: BgMode = BgMode.AUTO,
     val bgColor: Long = 0xFF000000L,
-    val fontScale: Float = 1f,
+    val size: Float = 0.022f,
     val align: Int = 1,
     val weight: Int = 0,
+    val spacing: Float = 0f,
+    val font: Int = 0,
 ) {
-    fun encode() = "${kind.name}|$textColor|${bgMode.name}|$bgColor|$fontScale|$align|$weight"
+    fun encode() = "${kind.name}|$textColor|${bgMode.name}|$bgColor|$size|$align|$weight|$spacing|$font"
 
     companion object {
         fun decode(s: String?): MaskStyle? {
             val p = s?.split("|") ?: return null
-            if (p.size != 6 && p.size != 7) return null
+            if (p.size != 6 && p.size != 7 && p.size != 9) return null
+            val kind = MaskKind.entries.firstOrNull { it.name == p[0] } ?: return null
+            val legacy = p.size != 9
+            // Formato antiguo: el cuarto campo era un factor sobre la caja; ahora es un tamaño absoluto.
+            val size = if (legacy) kind.defaultSize * (p[4].toFloatOrNull() ?: return null) else p[4].toFloatOrNull() ?: return null
             return MaskStyle(
-                kind = MaskKind.entries.firstOrNull { it.name == p[0] } ?: return null,
+                kind = kind,
                 textColor = p[1].toLongOrNull() ?: return null,
                 bgMode = BgMode.entries.firstOrNull { it.name == p[2] } ?: return null,
                 bgColor = p[3].toLongOrNull() ?: return null,
-                fontScale = p[4].toFloatOrNull() ?: return null,
+                size = size,
                 align = p[5].toIntOrNull() ?: return null,
-                weight = if (p.size == 7) p[6].toIntOrNull() ?: return null else 0,
+                weight = if (p.size >= 7) p[6].toIntOrNull() ?: return null else 0,
+                spacing = if (p.size == 9) p[7].toFloatOrNull() ?: return null else 0f,
+                font = if (p.size == 9) p[8].toIntOrNull() ?: return null else 0,
             )
+        }
+    }
+}
+
+/** Una máscara colocada por el usuario en una pantalla (se añaden y se quitan libremente). */
+data class MaskItem(val id: Int, val zone: Zone, val style: MaskStyle) {
+    fun encode() = "$id#${zone.encode()}#${style.encode()}"
+
+    companion object {
+        fun decode(s: String): MaskItem? {
+            val p = s.split("#")
+            if (p.size != 3) return null
+            return MaskItem(p[0].toIntOrNull() ?: return null, Zone.decode(p[1]) ?: return null, MaskStyle.decode(p[2]) ?: return null)
         }
     }
 }
@@ -137,23 +165,6 @@ object Specs {
         null, true, "bloq.",
     )
 
-    /**
-     * Hasta tres máscaras de hora/fecha por pantalla (desactivadas por defecto). Las de hora corta
-     * (barra superior) llevan letra normal; las grandes, fina.
-     */
-    private fun maskSpecs(prefix: String, kinds: List<MaskKind>): List<BoxSpec> = kinds.mapIndexed { i, kind ->
-        BoxSpec(
-            "${prefix}Mask${i + 1}", "Máscara ${i + 1}",
-            "Tapa la hora o fecha fija de la captura y dibuja la real. Elige tipo, color, tamaño y fondo abajo.",
-            null, true, "máscara ${i + 1}",
-            maskDefault = MaskStyle(kind = kind, weight = if (kind == MaskKind.TIME_NOZERO || kind == MaskKind.TIME) 1 else 0),
-        )
-    }
-
-    val lockMasks = maskSpecs("lock", listOf(MaskKind.TIME_STACKED, MaskKind.DATE, MaskKind.TIME_NOZERO))
-    val padMasks = maskSpecs("pad", listOf(MaskKind.TIME_NOZERO, MaskKind.TIME, MaskKind.DATE))
-    val homeMasks = maskSpecs("home", listOf(MaskKind.DATE, MaskKind.TIME_NOZERO, MaskKind.TIME))
-
     /** Botones ocultos globales (se activan con pulsación larga). */
     val settingsBox = BoxSpec(
         "settingsBox", "Acceso a Ajustes",
@@ -168,15 +179,9 @@ object Specs {
     val hidden = listOf(settingsBox, resetBox)
 
     fun forScreen(id: ScreenId): List<BoxSpec> = when (id) {
-        ScreenId.LOCK -> listOf(lockOpen) + lockMasks
-        ScreenId.PAD -> keys + listOf(padDots, padBack) + padMasks
-        ScreenId.HOME -> listOf(homeReveal, homeRevealView, homeLock) + homeMasks
-    }
-
-    fun masksFor(id: ScreenId): List<BoxSpec> = when (id) {
-        ScreenId.LOCK -> lockMasks
-        ScreenId.HOME -> homeMasks
-        ScreenId.PAD -> padMasks
+        ScreenId.LOCK -> listOf(lockOpen)
+        ScreenId.PAD -> keys + listOf(padDots, padBack)
+        ScreenId.HOME -> listOf(homeReveal, homeRevealView, homeLock)
     }
 
     val all: List<BoxSpec> = ScreenId.entries.flatMap { forScreen(it) } + hidden
@@ -206,6 +211,8 @@ data class AppSettings(
     val pinLength: Int = 6,
     val overrides: Map<String, Zone?> = emptyMap(),
     val maskOverrides: Map<String, MaskStyle> = emptyMap(),
+    /** Máscaras de hora/fecha que el usuario añade a cada pantalla. */
+    val masks: Map<ScreenId, List<MaskItem>> = emptyMap(),
     val fbStyle: FeedbackStyle = FeedbackStyle.CIRCLE,
     val fbLight: Boolean = true,
     val fbIntensity: Float = 0.35f,
@@ -233,6 +240,15 @@ data class AppSettings(
     fun resetBoxes(keys: Collection<String>) = copy(overrides = overrides - keys.toSet(), maskOverrides = maskOverrides - keys.toSet())
     fun mask(spec: BoxSpec): MaskStyle = maskOverrides[spec.key] ?: spec.maskDefault ?: MaskStyle()
     fun withMask(key: String, m: MaskStyle) = copy(maskOverrides = maskOverrides + (key to m))
+
+    fun masksOf(id: ScreenId): List<MaskItem> = masks[id] ?: emptyList()
+    fun withMasks(id: ScreenId, list: List<MaskItem>) = copy(masks = masks + (id to list))
+    fun addMask(id: ScreenId, zone: Zone, style: MaskStyle): Pair<AppSettings, MaskItem> {
+        val item = MaskItem((masksOf(id).maxOfOrNull { it.id } ?: 0) + 1, zone, style)
+        return withMasks(id, masksOf(id) + item) to item
+    }
+    fun updateMask(id: ScreenId, item: MaskItem) = withMasks(id, masksOf(id).map { if (it.id == item.id) item else it })
+    fun removeMask(id: ScreenId, maskId: Int) = withMasks(id, masksOf(id).filter { it.id != maskId })
 }
 
 /** Qué tecla (y su caja) hay bajo un toque normalizado, o null. */
@@ -256,6 +272,10 @@ data class EffectState(val stage: Int = 0, val first: String = "") {
 
 private val dayNames = listOf("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
 private val monthNames = listOf("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
+private val dayLong = listOf("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+private val monthLong = listOf(
+    "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+)
 
 private fun two(n: Int) = if (n < 10) "0$n" else "$n"
 
@@ -269,6 +289,8 @@ fun maskLines(kind: MaskKind, t: LocalDateTime): List<String> = when (kind) {
     MaskKind.TIME_12_AMPM -> listOf("${hour12(t.hour)}:${two(t.minute)} ${if (t.hour < 12) "AM" else "PM"}")
     MaskKind.TIME_STACKED -> listOf(two(t.hour), two(t.minute))
     MaskKind.DATE -> listOf("${dayNames[t.dayOfWeek.ordinal]}, ${t.dayOfMonth} ${monthNames[t.monthNumber - 1]}")
+    MaskKind.DATE_SHORT -> listOf("${t.dayOfMonth} ${monthNames[t.monthNumber - 1]}")
+    MaskKind.DATE_LONG -> listOf("${dayLong[t.dayOfWeek.ordinal]}, ${t.dayOfMonth} de ${monthLong[t.monthNumber - 1]}")
 }
 
 /** Paleta de colores de texto y de fondo para máscaras y PIN revelado. */

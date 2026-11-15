@@ -33,12 +33,21 @@ class SettingsStore(private val prefs: KeyValueStore) {
             }
             MaskStyle.decode(prefs.getString("mask_${spec.key}"))?.let { masks[spec.key] = it }
         }
+        val screenMasks = HashMap<ScreenId, List<MaskItem>>()
+        for (id in ScreenId.entries) {
+            val raw = prefs.getString("masks_${id.name}")
+            val list = if (raw != null) {
+                raw.split(";").filter { it.isNotBlank() }.mapNotNull { MaskItem.decode(it) }
+            } else legacyMasks(id)
+            if (list.isNotEmpty()) screenMasks[id] = list
+        }
         val d = AppSettings()
         val style = FeedbackStyle.entries.firstOrNull { it.name == prefs.getString("fbStyle") } ?: d.fbStyle
         return AppSettings(
             pinLength = int("pinLength", d.pinLength, 3, 10),
             overrides = overrides,
             maskOverrides = masks,
+            masks = screenMasks,
             fbStyle = style,
             fbLight = prefs.getBoolean("fbLight", d.fbLight),
             fbTint = prefs.getLong("fbTint", d.fbTint),
@@ -74,6 +83,7 @@ class SettingsStore(private val prefs: KeyValueStore) {
         prefs.putLong("dimBlur", s.dimBlur.toLong())
         prefs.putLong("settingsHoldMs", s.settingsHoldMs.toLong())
         prefs.putLong("resetHoldMs", s.resetHoldMs.toLong())
+        for (id in ScreenId.entries) prefs.putString("masks_${id.name}", s.masksOf(id).joinToString(";") { it.encode() })
         for (spec in Specs.all) {
             val raw = if (s.overrides.containsKey(spec.key)) (s.overrides[spec.key]?.encode() ?: "") else DEFAULT_MARK
             prefs.putString("box_${spec.key}", raw)
@@ -86,6 +96,22 @@ class SettingsStore(private val prefs: KeyValueStore) {
     fun saveEffect(e: EffectState) {
         prefs.putLong("stage", e.stage.toLong())
         prefs.putString("firstPin", e.first)
+    }
+
+    /** Máscaras fijas de versiones anteriores («lockMask1»…): se convierten en máscaras libres. */
+    private fun legacyMasks(id: ScreenId): List<MaskItem> {
+        val prefix = id.name.lowercase()
+        val kinds = when (id) {
+            ScreenId.LOCK -> listOf(MaskKind.TIME_STACKED, MaskKind.DATE, MaskKind.TIME_NOZERO)
+            ScreenId.PAD -> listOf(MaskKind.TIME_NOZERO, MaskKind.TIME, MaskKind.DATE)
+            ScreenId.HOME -> listOf(MaskKind.DATE, MaskKind.TIME_NOZERO, MaskKind.TIME)
+        }
+        return kinds.mapIndexedNotNull { i, kind ->
+            val zone = Zone.decode(prefs.getString("box_${prefix}Mask${i + 1}")) ?: return@mapIndexedNotNull null
+            val style = MaskStyle.decode(prefs.getString("mask_${prefix}Mask${i + 1}"))
+                ?: MaskStyle(kind = kind, size = kind.defaultSize)
+            MaskItem(i + 1, zone, style)
+        }
     }
 
     private companion object {

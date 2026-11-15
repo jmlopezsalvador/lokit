@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -22,6 +23,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import kotlinx.coroutines.delay
@@ -47,8 +49,90 @@ fun rememberNow(): LocalDateTime {
 
 private fun argb(v: Long) = Color(v.toInt())
 
-/** Relleno automático de una máscara: rejilla de colores (ARGB) calculada a partir de los bordes de la caja en la captura. */
-class MaskFill(val bitmap: ImageBitmap)
+/**
+ * Relleno automático de una máscara. `box` = (x, y, ancho, alto) en píxeles de la captura. Si hay `src`, se copia de la
+ * captura la región de ese tamaño que empieza en `src` (nítida, con la misma textura); si no, se usa el `smooth`.
+ */
+class MaskFill(val image: ImageBitmap, val iw: Int, val ih: Int, val box: IntArray, val src: IntArray?, val smooth: ImageBitmap?)
+
+private fun profile(pm: androidx.compose.ui.graphics.PixelMap, horizontal: Boolean): FloatArray {
+    val n = if (horizontal) pm.width else pm.height
+    val out = FloatArray(n * 3)
+    val depth = if (horizontal) pm.height else pm.width
+    for (i in 0 until n) {
+        var r = 0f
+        var g = 0f
+        var b = 0f
+        for (k in 0 until depth) {
+            val c = if (horizontal) pm[i, k] else pm[k, i]
+            r += c.red; g += c.green; b += c.blue
+        }
+        out[i * 3] = r / depth; out[i * 3 + 1] = g / depth; out[i * 3 + 2] = b / depth
+    }
+    return out
+}
+
+private fun meanDiff(a: FloatArray, b: FloatArray): Float {
+    val n = minOf(a.size, b.size)
+    if (n == 0) return 0f
+    var sum = 0f
+    for (i in 0 until n) sum += kotlin.math.abs(a[i] - b[i])
+    return sum / n
+}
+
+/**
+ * Busca en la propia captura la región del mismo tamaño que mejor encaja con el entorno de la caja (sus bordes se
+ * parecen a lo que rodea la caja y no tiene texto ni iconos). Devuelve su esquina, o null si ninguna sirve.
+ */
+private fun findCloneSource(img: ImageBitmap, x0: Int, y0: Int, w: Int, h: Int): IntArray? {
+    val iw = img.width
+    val ih = img.height
+    if (w < 4 || h < 4) return null
+    val hasTop = y0 >= 3
+    val hasBottom = y0 + h + 3 <= ih
+    val hasLeft = x0 >= 3
+    val hasRight = x0 + w + 3 <= iw
+    val ringTop = if (hasTop) profile(img.toPixelMap(x0, y0 - 3, w, 2), true) else null
+    val ringBottom = if (hasBottom) profile(img.toPixelMap(x0, y0 + h + 1, w, 2), true) else null
+    val ringLeft = if (hasLeft) profile(img.toPixelMap(x0 - 3, y0, 2, h), false) else null
+    val ringRight = if (hasRight) profile(img.toPixelMap(x0 + w + 1, y0, 2, h), false) else null
+    var best: IntArray? = null
+    var bestCost = Float.MAX_VALUE
+    val shifts = listOf(0 to -1, 0 to 1, -1 to 0, 1 to 0, 0 to -2, 0 to 2, -2 to 0, 2 to 0, -1 to -1, 1 to 1, -1 to 1, 1 to -1)
+    for ((kx, ky) in shifts) {
+        val sx = x0 + kx * w
+        val sy = y0 + ky * h
+        if (sx < 0 || sy < 0 || sx + w > iw || sy + h > ih) continue
+        val pm = img.toPixelMap(sx, sy, w, h)
+        var cost = 0f
+        var terms = 0
+        ringTop?.let { cost += meanDiff(it, profile(img.toPixelMap(sx, sy, w, 2), true)); terms++ }
+        ringBottom?.let { cost += meanDiff(it, profile(img.toPixelMap(sx, sy + h - 2, w, 2), true)); terms++ }
+        ringLeft?.let { cost += meanDiff(it, profile(img.toPixelMap(sx, sy, 2, h), false)); terms++ }
+        ringRight?.let { cost += meanDiff(it, profile(img.toPixelMap(sx + w - 2, sy, 2, h), false)); terms++ }
+        if (terms > 0) cost /= terms
+        // Penaliza regiones con detalle (texto, iconos): desviación típica del brillo.
+        var sum = 0f
+        var sum2 = 0f
+        var n = 0
+        var yy = 0
+        while (yy < h) {
+            var xx = 0
+            while (xx < w) {
+                val c = pm[xx, yy]
+                val l = (c.red + c.green + c.blue) / 3f
+                sum += l; sum2 += l * l; n++
+                xx += 2
+            }
+            yy += 2
+        }
+        val mean = sum / n
+        val sd = kotlin.math.sqrt((sum2 / n - mean * mean).coerceAtLeast(0f))
+        cost += sd * 0.6f
+        if (cost < bestCost) { bestCost = cost; best = intArrayOf(sx, sy) }
+    }
+    return best
+}
 
 private fun avgChannels(pm: androidx.compose.ui.graphics.PixelMap, xa: Int, xb: Int, ya: Int, yb: Int): FloatArray {
     var r = 0f
@@ -66,7 +150,7 @@ private fun avgChannels(pm: androidx.compose.ui.graphics.PixelMap, xa: Int, xb: 
  * Muestrea las franjas de la captura justo fuera de la caja (arriba, abajo, izquierda y derecha) y rellena el
  * interior por interpolación entre los cuatro bordes, de forma que la máscara se funde con el fondo.
  */
-fun sampleFill(img: ImageBitmap, z: Zone, cols: Int = 24, rows: Int = 32): MaskFill {
+fun sampleFill(img: ImageBitmap, z: Zone, mode: BgMode = BgMode.AUTO, cols: Int = 24, rows: Int = 32): MaskFill {
     val iw = img.width
     val ih = img.height
     val x0 = (z.x * iw).toInt().coerceIn(0, iw - 2)
@@ -75,6 +159,10 @@ fun sampleFill(img: ImageBitmap, z: Zone, cols: Int = 24, rows: Int = 32): MaskF
     val y1 = ((z.y + z.h) * ih).toInt().coerceIn(y0 + 1, ih)
     val w = x1 - x0
     val h = y1 - y0
+    if (mode == BgMode.AUTO) {
+        val src = findCloneSource(img, x0, y0, w, h)
+        if (src != null) return MaskFill(img, iw, ih, intArrayOf(x0, y0, w, h), src, null)
+    }
     val top = img.toPixelMap(x0, (y0 - 3).coerceIn(0, ih - 2), w, 2)
     val bottom = img.toPixelMap(x0, (y1 + 1).coerceIn(0, ih - 2), w, 2)
     val left = img.toPixelMap((x0 - 3).coerceIn(0, iw - 2), y0, 2, h)
@@ -117,7 +205,7 @@ fun sampleFill(img: ImageBitmap, z: Zone, cols: Int = 24, rows: Int = 32): MaskF
         paint.color = Color(ch[0], ch[1], ch[2])
         canvas.drawRect(c.toFloat(), r.toFloat(), c + 1f, r + 1f, paint)
     }
-    return MaskFill(bmp)
+    return MaskFill(img, iw, ih, intArrayOf(x0, y0, w, h), null, bmp)
 }
 
 /** Pinta el fondo de una máscara sobre la zona. */
@@ -129,32 +217,51 @@ fun DrawScope.drawMaskBackground(zone: Zone, style: MaskStyle, fill: MaskFill?) 
     when (style.bgMode) {
         BgMode.NONE -> {}
         BgMode.SOLID -> drawRect(argb(style.bgColor), Offset(left, top), Size(w, h))
-        BgMode.AUTO -> {
-            if (fill == null) {
-                drawRect(Color.Black, Offset(left, top), Size(w, h))
-            } else {
-                // La rejilla pequeña se escala con interpolación para que el relleno quede suave.
+        BgMode.AUTO, BgMode.SMOOTH -> {
+            if (fill == null) return
+            // La región se calcula en píxeles de la captura y se coloca con la misma escala que la captura.
+            val sx = size.width / fill.iw
+            val sy = size.height / fill.ih
+            val dx = (fill.box[0] * sx).toInt()
+            val dy = (fill.box[1] * sy).toInt()
+            val dw = ((fill.box[0] + fill.box[2]) * sx).toInt() + 1 - dx
+            val dh = ((fill.box[1] + fill.box[3]) * sy).toInt() + 1 - dy
+            val src = fill.src
+            val smooth = fill.smooth
+            if (src != null) {
                 drawImage(
-                    fill.bitmap,
-                    dstOffset = IntOffset(left.toInt(), top.toInt()),
-                    dstSize = IntSize(w.toInt() + 1, h.toInt() + 1),
-                    filterQuality = FilterQuality.High,
+                    fill.image,
+                    srcOffset = IntOffset(src[0], src[1]), srcSize = IntSize(fill.box[2], fill.box[3]),
+                    dstOffset = IntOffset(dx, dy), dstSize = IntSize(dw, dh),
+                    filterQuality = FilterQuality.Low,
                 )
+            } else if (smooth != null) {
+                drawImage(smooth, dstOffset = IntOffset(dx, dy), dstSize = IntSize(dw, dh), filterQuality = FilterQuality.High)
             }
         }
     }
 }
 
-/** Pinta las líneas de texto de una máscara centradas en la zona. */
+private val fonts = listOf(FontFamily.Default, FontFamily.Serif, FontFamily.Monospace, FontFamily.Cursive)
+
+/**
+ * Pinta las líneas de texto de una máscara. El tamaño de letra es absoluto (`style.size` × alto de pantalla): la caja
+ * solo decide dónde se alinea el texto, así que cambiarla de tamaño no altera el contenido.
+ */
 fun DrawScope.drawMaskText(measurer: TextMeasurer, zone: Zone, style: MaskStyle, lines: List<String>) {
     if (lines.isEmpty()) return
     val left = zone.x * size.width
     val top = zone.y * size.height
     val w = zone.w * size.width
     val h = zone.h * size.height
-    val maxLen = lines.maxOf { it.length }.coerceAtLeast(1)
-    val fontPx = minOf(h / lines.size * 0.9f, w / (maxLen * 0.52f)) * style.fontScale
-    val ts = TextStyle(color = argb(style.textColor), fontSize = fontPx.toSp(), fontWeight = when (style.weight) { 2 -> FontWeight.Bold; 1 -> FontWeight.Normal; else -> FontWeight.Light })
+    val fontPx = style.size * size.height
+    val ts = TextStyle(
+        color = argb(style.textColor),
+        fontSize = fontPx.toSp(),
+        fontFamily = fonts[style.font.coerceIn(0, fonts.size - 1)],
+        fontWeight = when (style.weight) { 2 -> FontWeight.Bold; 1 -> FontWeight.Normal; else -> FontWeight.Light },
+        letterSpacing = (style.spacing * fontPx).toSp(),
+    )
     val layouts = lines.map { measurer.measure(it, ts) }
     val step = layouts.first().size.height * 0.85f
     val total = step * (layouts.size - 1) + layouts.last().size.height
@@ -170,12 +277,20 @@ fun DrawScope.drawMaskText(measurer: TextMeasurer, zone: Zone, style: MaskStyle,
     }
 }
 
-/** Capa de una máscara: fondo (según `style.bgMode`) y, si hay `lines`, el texto. */
+/**
+ * Capa de una máscara: fondo (según `style.bgMode`) y, si hay `lines`, el texto. `debounceMs` retrasa el cálculo del
+ * relleno automático mientras se arrastra la caja en el editor.
+ */
 @Composable
-fun MaskLayer(zone: Zone, style: MaskStyle, image: ImageBitmap?, lines: List<String>?) {
+fun MaskLayer(zone: Zone, style: MaskStyle, image: ImageBitmap?, lines: List<String>?, debounceMs: Long = 0L) {
     val measurer = rememberTextMeasurer()
-    val fill = remember(image, zone, style.bgMode) {
-        if (style.bgMode == BgMode.AUTO && image != null) runCatching { sampleFill(image, zone) }.getOrNull() else null
+    val auto = style.bgMode == BgMode.AUTO || style.bgMode == BgMode.SMOOTH
+    val fill by produceState<MaskFill?>(null, image, zone, style.bgMode) {
+        value = null
+        if (auto && image != null) {
+            if (debounceMs > 0) delay(debounceMs)
+            value = runCatching { sampleFill(image, zone, style.bgMode) }.getOrNull()
+        }
     }
     Canvas(Modifier.fillMaxSize()) {
         drawMaskBackground(zone, style, fill)

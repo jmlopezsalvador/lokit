@@ -30,7 +30,7 @@ El usuario habla español: responde y comenta el código en español.
 ## Qué hace la app
 Efecto de magia: la app imita el móvil del mago (escritorio, bloqueo, teclado de PIN) con **capturas** y **cajas invisibles** configurables.
 El primer PIN que teclea el espectador falla y se guarda; los siguientes siempre desbloquean; una caja secreta del escritorio revela el PIN guardado.
-Botones ocultos por pulsación larga: Ajustes (esquina superior derecha) y reset (superior izquierda), con caja y duración configurables. Máscaras de hora/fecha reales y modo atenuado en el bloqueo; el PIN revelado se ve solo mientras se pulsa. Detalle en `docs/SPEC.md`. Paquete `com.lokit`.
+Botones ocultos por pulsación larga: Ajustes (esquina superior derecha) y reset (superior izquierda), con caja y duración configurables. Máscaras libres de hora/fecha reales (se añaden en el editor de cajas) y modo atenuado en el bloqueo; el PIN revelado se ve solo mientras se pulsa. Detalle en `docs/SPEC.md`. Paquete `com.lokit`.
 Código: `Model.kt` (cajas por tecla, lógica del efecto), `KeyFeedback.kt` (resalte de teclas), `Masks.kt` (reloj real, máscaras, puntos, PIN revelado), `App.kt` (móvil falso), `SettingsScreen.kt` (ajustes y editor de cajas), `Platform*.kt` (capturas, galería, ficheros).
 
 ## Reglas de código para que compile en iOS

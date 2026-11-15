@@ -20,6 +20,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -232,10 +233,8 @@ private fun FakePhone(
         }
 
         // Máscaras con la fecha y la hora reales (tapan las fijas de la captura).
-        for (spec in Specs.masksFor(screen)) {
-            val z = settings.box(spec) ?: continue
-            val st = settings.mask(spec)
-            MaskLayer(z, st, img, maskLines(st.kind, now))
+        for (m in settings.masksOf(screen)) {
+            key(m.id) { MaskLayer(m.zone, m.style, img, maskLines(m.style.kind, now)) }
         }
 
         if (screen == ScreenId.PAD) {
