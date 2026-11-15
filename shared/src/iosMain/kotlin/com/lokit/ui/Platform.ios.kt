@@ -58,8 +58,9 @@ private class PickerDelegate(private val onPicked: (ByteArray) -> Unit) : NSObje
     override fun picker(picker: PHPickerViewController, didFinishPicking: List<*>) {
         picker.dismissViewControllerAnimated(true, null)
         val result = didFinishPicking.firstOrNull() as? PHPickerResult ?: return
-        result.itemProvider.loadObjectOfClass(UIImage) { obj, _ ->
-            val image = obj as? UIImage
+        // Se piden los datos crudos (puede ser HEIC/JPEG) y se pasan por UIImage a PNG, que Skia sabe decodificar.
+        result.itemProvider.loadDataRepresentationForTypeIdentifier("public.image") { raw, _ ->
+            val image = raw?.let { UIImage.imageWithData(it) }
             val data = image?.let { UIImagePNGRepresentation(it) }
             if (data != null) {
                 val bytes = data.toByteArray()
