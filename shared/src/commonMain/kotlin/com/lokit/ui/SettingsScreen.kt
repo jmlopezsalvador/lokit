@@ -45,32 +45,73 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
-/** Ajustes: capturas, número de dígitos, reinicio del efecto y editor de cajas. */
+private fun pct(v: Float) = "${(v * 100).roundToInt()} %"
+private fun secs(ms: Int) = "${ms / 1000}.${(ms % 1000) / 100} s"
+
+/** Fila «etiqueta  valor  [−] [+]». */
+@Composable
+private fun Stepper(label: String, value: String, onMinus: () -> Unit, onPlus: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        Text("$label: $value", fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onMinus) { Text("−") }
+            OutlinedButton(onClick = onPlus) { Text("+") }
+        }
+    }
+}
+
+/** Fila «etiqueta  deslizador». */
+@Composable
+private fun SliderRow(
+    label: String, value: Float, range: ClosedFloatingPointRange<Float>, shown: String,
+    onChange: (Float) -> Unit, textColor: Color = Color.Unspecified,
+) {
+    Column {
+        Text("$label: $shown", fontSize = 12.sp, color = textColor)
+        Slider(value = value.coerceIn(range.start, range.endInclusive), onValueChange = onChange, valueRange = range)
+    }
+}
+
+/** Fila desplazable de chips de color. */
+@Composable
+private fun ColorChips(options: List<Pair<String, Long>>, selected: Long, onPick: (Long) -> Unit) {
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for ((name, argb) in options) {
+            FilterChip(selected = selected == argb, onClick = { onPick(argb) }, label = { Text(name) })
+        }
+    }
+}
+
+/** Ajustes: capturas, botones ocultos, modo atenuado y editor de cajas. */
 @Composable
 fun SettingsScreen(
     settings: AppSettings,
     effect: EffectState,
     images: Map<ScreenId, ImageBitmap?>,
     onSettings: (AppSettings) -> Unit,
-    onEffect: (EffectState) -> Unit,
     onPickImage: (ScreenId, ByteArray) -> Unit,
     onRemoveImage: (ScreenId) -> Unit,
     onClose: () -> Unit,
 ) {
     var target by remember { mutableStateOf<ScreenId?>(null) }
     var editing by remember { mutableStateOf<ScreenId?>(null) }
+    var editingHidden by remember { mutableStateOf(false) }
     val pick = rememberImagePicker { bytes -> target?.let { onPickImage(it, bytes) } }
 
     val editId = editing
-    if (editId != null) {
+    if (editId != null || editingHidden) {
         BoxEditor(
-            id = editId,
-            image = images[editId],
+            title = if (editId != null) editId.title else "Botones ocultos",
+            image = images[editId ?: ScreenId.LOCK],
+            specs = if (editId != null) Specs.forScreen(editId) else Specs.hidden,
+            screenId = editId,
             settings = settings,
             onDone = { newSettings ->
                 if (newSettings != null) onSettings(newSettings)
                 editing = null
+                editingHidden = false
             },
         )
         return
@@ -92,22 +133,63 @@ fun SettingsScreen(
                     else -> "Desbloqueado. PIN guardado: ${effect.first}."
                 }
                 Text(status, fontSize = 13.sp)
-                Button(onClick = { onEffect(EffectState()) }, enabled = effect.stage != 0) {
-                    Text("Reiniciar efecto (borra el PIN guardado)")
-                }
+                Text("Para reiniciar usa el botón oculto de reset (por defecto, esquina superior izquierda) o el de bloquear del escritorio.", fontSize = 12.sp, color = Color(0xFF9AA4B2))
             }
         }
 
         Card(Modifier.fillMaxWidth()) {
-            Row(
-                Modifier.padding(12.dp).fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text("Dígitos del PIN: ${settings.pinLength}")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { if (settings.pinLength > 3) onSettings(settings.copy(pinLength = settings.pinLength - 1)) }) { Text("−") }
-                    OutlinedButton(onClick = { if (settings.pinLength < 10) onSettings(settings.copy(pinLength = settings.pinLength + 1)) }) { Text("+") }
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Stepper(
+                    "Dígitos del PIN", "${settings.pinLength}",
+                    { if (settings.pinLength > 3) onSettings(settings.copy(pinLength = settings.pinLength - 1)) },
+                    { if (settings.pinLength < 10) onSettings(settings.copy(pinLength = settings.pinLength + 1)) },
+                )
+            }
+        }
+
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Botones ocultos", fontSize = 16.sp)
+                Text(
+                    "Se activan con pulsación larga en cualquier pantalla. Ajustes: esquina superior derecha. Reset: esquina superior izquierda.",
+                    fontSize = 12.sp, color = Color(0xFF9AA4B2),
+                )
+                Stepper(
+                    "Pulsación para Ajustes", secs(settings.settingsHoldMs),
+                    { onSettings(settings.copy(settingsHoldMs = (settings.settingsHoldMs - 100).coerceAtLeast(200))) },
+                    { onSettings(settings.copy(settingsHoldMs = (settings.settingsHoldMs + 100).coerceAtMost(5000))) },
+                )
+                Stepper(
+                    "Pulsación para reset", secs(settings.resetHoldMs),
+                    { onSettings(settings.copy(resetHoldMs = (settings.resetHoldMs - 100).coerceAtLeast(200))) },
+                    { onSettings(settings.copy(resetHoldMs = (settings.resetHoldMs + 100).coerceAtMost(5000))) },
+                )
+                Button(onClick = { editingHidden = true }) { Text("Posición y tamaño de las cajas") }
+            }
+        }
+
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Switch(checked = settings.dimEnabled, onCheckedChange = { onSettings(settings.copy(dimEnabled = it)) })
+                    Text("Modo atenuado en el bloqueo", fontSize = 16.sp)
+                }
+                Text(
+                    "El bloqueo arranca desenfocado y oscuro. Un toque lo despierta; si pasan unos segundos sin tocar vuelve a apagarse; con la pantalla despierta, otro toque abre el teclado.",
+                    fontSize = 12.sp, color = Color(0xFF9AA4B2),
+                )
+                if (settings.dimEnabled) {
+                    Stepper(
+                        "Se apaga tras", "${settings.dimSeconds} s",
+                        { onSettings(settings.copy(dimSeconds = (settings.dimSeconds - 1).coerceAtLeast(1))) },
+                        { onSettings(settings.copy(dimSeconds = (settings.dimSeconds + 1).coerceAtMost(120))) },
+                    )
+                    SliderRow("Oscuridad", settings.dimLevel, 0f..0.95f, pct(settings.dimLevel), { onSettings(settings.copy(dimLevel = it)) })
+                    SliderRow(
+                        "Desenfoque", settings.dimBlur.toFloat(), 0f..40f, "${settings.dimBlur}",
+                        { onSettings(settings.copy(dimBlur = it.roundToInt())) },
+                    )
+                    Text("El desenfoque solo se ve en Android 12 o posterior y en iOS.", fontSize = 11.sp, color = Color(0xFF9AA4B2))
                 }
             }
         }
@@ -127,14 +209,15 @@ fun SettingsScreen(
         }
 
         Text(
-            "Acceso a Ajustes: pulsación larga en la esquina superior izquierda de cualquier pantalla. " +
-                "Las capturas se ven estiradas a pantalla completa; haz los pantallazos con el mismo móvil que usarás. " +
-                "El resalte de las teclas se configura dentro de «Cajas» del teclado de PIN.",
+            "Las capturas se ven estiradas a pantalla completa; haz los pantallazos con el mismo móvil que usarás. " +
+                "El resalte de las teclas, los puntos del PIN y las máscaras de hora y fecha se configuran dentro de «Cajas».",
             fontSize = 12.sp, color = Color(0xFF9AA4B2),
         )
         Button(onClick = onClose, Modifier.fillMaxWidth()) { Text("Volver a la app") }
     }
 }
+
+private val boxColors = listOf(Color(0xFF4FC3F7), Color(0xFFFFB74D), Color(0xFF81C784), Color(0xFFE57373))
 
 /** Tintes del resalte: automático (0) y algunos tonales habituales en teclados. */
 private val tints = listOf(
@@ -145,15 +228,22 @@ private val tints = listOf(
     "Gris" to 0xFF9E9E9EL,
 )
 
-private val boxColors = listOf(Color(0xFF4FC3F7), Color(0xFFFFB74D), Color(0xFF81C784), Color(0xFFE57373))
+private val aligns = listOf("Izquierda", "Centro", "Derecha")
+private val weights = listOf("Fina", "Normal", "Negrita")
 
 /**
  * Editor de cajas invisibles sobre la captura: arrastrar para mover, esquina inferior derecha para redimensionar.
- * En el teclado de PIN también configura y prueba el resalte de las teclas.
+ * Según la caja elegida, el panel configura también su máscara, los puntos del PIN, el PIN revelado o el resalte.
  */
 @Composable
-private fun BoxEditor(id: ScreenId, image: ImageBitmap?, settings: AppSettings, onDone: (AppSettings?) -> Unit) {
-    val specs = Specs.forScreen(id)
+private fun BoxEditor(
+    title: String,
+    image: ImageBitmap?,
+    specs: List<BoxSpec>,
+    screenId: ScreenId?,
+    settings: AppSettings,
+    onDone: (AppSettings?) -> Unit,
+) {
     var current by remember { mutableStateOf(settings) }
     var selected by remember { mutableStateOf(specs.first().key) }
     var panelTop by remember { mutableStateOf(false) }
@@ -161,11 +251,32 @@ private fun BoxEditor(id: ScreenId, image: ImageBitmap?, settings: AppSettings, 
     var testing by remember { mutableStateOf(false) }
     val feedback = remember { KeyFeedback() }
     val measurer = rememberTextMeasurer()
+    val now = rememberNow()
     val spec = specs.first { it.key == selected }
-    val isPad = id == ScreenId.PAD
+    val isPad = screenId == ScreenId.PAD
+    val white = Color.White
 
     Box(Modifier.fillMaxSize().background(Color(0xFF222222))) {
         if (image != null) Image(image, null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+
+        // Vista previa real de las máscaras de hora/fecha y de los puntos del PIN.
+        if (!testing) {
+            for (sp in screenId?.let { Specs.masksFor(it) } ?: emptyList()) {
+                val z = current.box(sp) ?: continue
+                val st = current.mask(sp)
+                MaskLayer(z, st, image, maskLines(st.kind, now))
+            }
+            if (isPad) {
+                current.box(Specs.padDots)?.let { z ->
+                    MaskLayer(z, current.mask(Specs.padDots), image, null)
+                    Canvas(Modifier.fillMaxSize()) { drawPinDots(z, current, 3, 0f) }
+                }
+            }
+            if (screenId == ScreenId.HOME && selected == Specs.homeRevealView.key) {
+                val view = current.box(Specs.homeRevealView) ?: Specs.homeRevealView.default!!
+                Canvas(Modifier.fillMaxSize()) { drawReveal(measurer, view, current, "427193") }
+            }
+        }
 
         Canvas(
             Modifier.fillMaxSize().pointerInput(testing) {
@@ -218,7 +329,7 @@ private fun BoxEditor(id: ScreenId, image: ImageBitmap?, settings: AppSettings, 
                 val topLeft = Offset(b.x * size.width, b.y * size.height)
                 val sz = Size(b.w * size.width, b.h * size.height)
                 if (!testing) {
-                    drawRect(color.copy(alpha = if (isSel) 0.30f else 0.15f), topLeft, sz)
+                    drawRect(color.copy(alpha = if (isSel) 0.30f else 0.12f), topLeft, sz)
                     drawRect(color, topLeft, sz, style = Stroke(width = if (isSel) 5f else 2f))
                     if (sp.tag.isNotEmpty()) {
                         val layout = measurer.measure(sp.tag, TextStyle(color = Color.White, fontSize = 12.sp))
@@ -245,10 +356,10 @@ private fun BoxEditor(id: ScreenId, image: ImageBitmap?, settings: AppSettings, 
             Column(
                 Modifier.align(if (panelTop) Alignment.TopCenter else Alignment.BottomCenter).fillMaxWidth()
                     .background(Color.Black.copy(alpha = 0.88f)).safeDrawingPadding()
-                    .heightIn(max = 330.dp).verticalScroll(rememberScrollState()).padding(12.dp),
+                    .heightIn(max = 380.dp).verticalScroll(rememberScrollState()).padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("Cajas de «${id.title}»", fontSize = 14.sp, color = Color.White)
+                Text("Cajas de «$title»", fontSize = 14.sp, color = white)
                 if (image == null) Text("Sin captura: las cajas se colocan sobre fondo gris.", fontSize = 11.sp, color = Color(0xFFFFB74D))
 
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -265,15 +376,67 @@ private fun BoxEditor(id: ScreenId, image: ImageBitmap?, settings: AppSettings, 
                                 current = current.withBox(spec.key, if (on) (spec.default ?: Zone(0.3f, 0.4f, 0.4f, 0.1f)) else null)
                             },
                         )
-                        Text("Activa", fontSize = 13.sp, color = Color.White)
+                        Text("Activa", fontSize = 13.sp, color = white)
                     }
+                }
+
+                // Máscara (hora/fecha o puntos del PIN): fondo y, en hora/fecha, texto.
+                if (spec.maskDefault != null && current.box(spec) != null) {
+                    val st = current.mask(spec)
+                    val isDots = spec.key == Specs.padDots.key
+                    if (isDots) {
+                        SliderRow("Tamaño de los círculos", current.dotSize, 0.2f..1.5f, pct(current.dotSize), { current = current.copy(dotSize = it) }, white)
+                        SliderRow("Separación", current.dotGap, 0f..3f, pct(current.dotGap), { current = current.copy(dotGap = it) }, white)
+                        SliderRow("Grosor del borde", current.dotBorder, 0.05f..1f, pct(current.dotBorder), { current = current.copy(dotBorder = it) }, white)
+                        Text("Máscara: tapa lo que traiga la captura en esa zona (puntos o recuadro).", fontSize = 11.sp, color = Color(0xFFB0B8C4))
+                    } else {
+                        Text("Tipo", fontSize = 12.sp, color = white)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            for (k in MaskKind.entries) {
+                                FilterChip(selected = st.kind == k, onClick = { current = current.withMask(spec.key, st.copy(kind = k)) }, label = { Text(k.label) })
+                            }
+                        }
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            aligns.forEachIndexed { i, name ->
+                                FilterChip(selected = st.align == i, onClick = { current = current.withMask(spec.key, st.copy(align = i)) }, label = { Text(name) })
+                            }
+                        }
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            weights.forEachIndexed { i, name ->
+                                FilterChip(selected = st.weight == i, onClick = { current = current.withMask(spec.key, st.copy(weight = i)) }, label = { Text(name) })
+                            }
+                        }
+                        Text("Color del texto", fontSize = 12.sp, color = white)
+                        ColorChips(Palette.text, st.textColor) { current = current.withMask(spec.key, st.copy(textColor = it)) }
+                        SliderRow("Tamaño del texto", st.fontScale, 0.3f..1.6f, pct(st.fontScale), { current = current.withMask(spec.key, st.copy(fontScale = it)) }, white)
+                    }
+                    Text(if (isDots) "Máscara" else "Fondo", fontSize = 12.sp, color = white)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (m in BgMode.entries) {
+                            FilterChip(
+                                selected = st.bgMode == m,
+                                onClick = { current = current.withMask(spec.key, st.copy(bgMode = m)) },
+                                label = { Text(if (isDots && m == BgMode.NONE) "Sin máscara" else m.label) },
+                            )
+                        }
+                    }
+                    if (st.bgMode == BgMode.SOLID) {
+                        ColorChips(Palette.bg, st.bgColor) { current = current.withMask(spec.key, st.copy(bgColor = it)) }
+                    }
+                }
+
+                // PIN revelado: opacidad del fondo y color del número.
+                if (spec.key == Specs.homeRevealView.key) {
+                    SliderRow("Opacidad del fondo", current.revealBgAlpha, 0f..1f, pct(current.revealBgAlpha), { current = current.copy(revealBgAlpha = it) }, white)
+                    Text("Color del número", fontSize = 12.sp, color = white)
+                    ColorChips(Palette.text, current.revealColor) { current = current.copy(revealColor = it) }
                 }
 
                 if (isPad) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = {
                             val b = current.box(spec)
-                            if (b != null) {
+                            if (b != null && Specs.hitOf(spec) != null) {
                                 // Copia el tamaño de la tecla elegida a todas las demás, manteniendo su posición.
                                 var s = current
                                 for (k in Specs.keys) {
@@ -286,7 +449,7 @@ private fun BoxEditor(id: ScreenId, image: ImageBitmap?, settings: AppSettings, 
                         OutlinedButton(onClick = { current = current.resetBoxes(Specs.keys.map { it.key }) }) { Text("Rejilla por defecto") }
                     }
 
-                    Text("Resalte al pulsar una tecla", fontSize = 13.sp, color = Color.White)
+                    Text("Resalte al pulsar una tecla", fontSize = 13.sp, color = white)
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         for (st in FeedbackStyle.entries) {
                             FilterChip(
@@ -300,26 +463,14 @@ private fun BoxEditor(id: ScreenId, image: ImageBitmap?, settings: AppSettings, 
                         Switch(checked = current.fbLight, onCheckedChange = { current = current.copy(fbLight = it) })
                         Text(
                             if (current.fbLight) "Resalte claro (teclado oscuro)" else "Resalte oscuro (teclado claro)",
-                            fontSize = 12.sp, color = Color.White,
+                            fontSize = 12.sp, color = white,
                         )
                     }
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        for ((name, argb) in tints) {
-                            FilterChip(selected = current.fbTint == argb, onClick = { current = current.copy(fbTint = argb) }, label = { Text(name) })
-                        }
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Intensidad", fontSize = 12.sp, color = Color.White)
-                        Slider(
-                            value = current.fbIntensity,
-                            onValueChange = { current = current.copy(fbIntensity = it) },
-                            valueRange = 0.05f..0.9f,
-                            modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
-                        )
-                    }
+                    ColorChips(tints, current.fbTint) { current = current.copy(fbTint = it) }
+                    SliderRow("Intensidad", current.fbIntensity, 0.05f..0.9f, pct(current.fbIntensity), { current = current.copy(fbIntensity = it) }, white)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Switch(checked = testing, onCheckedChange = { testing = it })
-                        Text("Probar resalte (toca las teclas)", fontSize = 12.sp, color = Color.White)
+                        Text("Probar resalte (toca las teclas)", fontSize = 12.sp, color = white)
                     }
                 }
 

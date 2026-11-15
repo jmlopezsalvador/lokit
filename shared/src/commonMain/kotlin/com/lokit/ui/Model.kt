@@ -1,5 +1,7 @@
 package com.lokit.ui
 
+import kotlinx.datetime.LocalDateTime
+
 /** Rectángulo normalizado (0..1) sobre la pantalla: x, y = esquina superior izquierda; w, h = tamaño. */
 data class Zone(val x: Float, val y: Float, val w: Float, val h: Float) {
     fun contains(px: Float, py: Float) = px >= x && px <= x + w && py >= y && py <= y + h
@@ -22,6 +24,56 @@ enum class ScreenId(val title: String, val file: String) {
     HOME("Escritorio", "home.img"),
 }
 
+/** Qué se dibuja en una máscara de hora/fecha. */
+enum class MaskKind(val label: String) {
+    TIME("Hora 24 h (05:53)"),
+    TIME_NOZERO("Hora 24 h sin cero (5:53)"),
+    TIME_12("Hora 12 h (5:53)"),
+    TIME_12_AMPM("Hora 12 h con AM/PM (5:53 PM)"),
+    TIME_STACKED("Hora en dos líneas"),
+    DATE("Fecha (dom, 15 nov)"),
+}
+
+/** Fondo de una máscara: con qué se tapa lo que trae la captura. */
+enum class BgMode(val label: String) {
+    NONE("Sin fondo"),
+    AUTO("Automático (de la captura)"),
+    SOLID("Color sólido"),
+}
+
+/**
+ * Aspecto de una máscara. Las de hora/fecha usan todo; la de los puntos del PIN solo usa el fondo.
+ * `align`: 0 izquierda, 1 centro, 2 derecha. `fontScale` multiplica el tamaño de texto que cabe en la caja.
+ * `weight`: 0 fina, 1 normal, 2 negrita.
+ */
+data class MaskStyle(
+    val kind: MaskKind = MaskKind.TIME,
+    val textColor: Long = 0xFFFFFFFFL,
+    val bgMode: BgMode = BgMode.AUTO,
+    val bgColor: Long = 0xFF000000L,
+    val fontScale: Float = 1f,
+    val align: Int = 1,
+    val weight: Int = 0,
+) {
+    fun encode() = "${kind.name}|$textColor|${bgMode.name}|$bgColor|$fontScale|$align|$weight"
+
+    companion object {
+        fun decode(s: String?): MaskStyle? {
+            val p = s?.split("|") ?: return null
+            if (p.size != 6 && p.size != 7) return null
+            return MaskStyle(
+                kind = MaskKind.entries.firstOrNull { it.name == p[0] } ?: return null,
+                textColor = p[1].toLongOrNull() ?: return null,
+                bgMode = BgMode.entries.firstOrNull { it.name == p[2] } ?: return null,
+                bgColor = p[3].toLongOrNull() ?: return null,
+                fontScale = p[4].toFloatOrNull() ?: return null,
+                align = p[5].toIntOrNull() ?: return null,
+                weight = if (p.size == 7) p[6].toIntOrNull() ?: return null else 0,
+            )
+        }
+    }
+}
+
 /** Una caja invisible configurable. `default == null` significa que está desactivada por defecto. */
 class BoxSpec(
     val key: String,
@@ -31,6 +83,8 @@ class BoxSpec(
     val optional: Boolean,
     /** Texto corto que se dibuja dentro de la caja en el editor. */
     val tag: String = "",
+    /** No nulo si la caja lleva máscara (fondo y, en hora/fecha, texto). */
+    val maskDefault: MaskStyle? = null,
 )
 
 /** Resultado de pulsar una tecla. */
@@ -42,7 +96,7 @@ sealed interface KeyHit {
 object Specs {
     val lockOpen = BoxSpec(
         "lockOpen", "Abrir teclado",
-        "Al tocar aquí en la pantalla de bloqueo aparece el teclado de PIN.",
+        "Al tocar aquí en la pantalla de bloqueo (ya despierta) aparece el teclado de PIN.",
         Zone(0f, 0f, 1f, 1f), false, "abrir",
     )
 
@@ -58,32 +112,74 @@ object Specs {
 
     val padDots = BoxSpec(
         "padDots", "Puntos del PIN",
-        "Zona donde se dibujan los puntos al teclear. Desactívala si tu captura ya los muestra.",
+        "Zona donde se dibujan los puntos al teclear. Si activas la máscara, tapa los puntos o el recuadro que trae la captura.",
         Zone(0.25f, 0.22f, 0.5f, 0.04f), true, "•••",
+        maskDefault = MaskStyle(bgMode = BgMode.NONE),
     )
     val padBack = BoxSpec(
         "padBack", "Atrás / Cancelar",
-        "Vuelve a la pantalla de bloqueo.",
+        "Vuelve a la pantalla de bloqueo (sin reiniciar el efecto).",
         null, true, "atrás",
     )
     val homeReveal = BoxSpec(
-        "homeReveal", "Revelar PIN",
-        "Zona secreta del escritorio: al tocarla se muestra el número que tecleó el espectador.",
+        "homeReveal", "Revelar PIN (mantener pulsado)",
+        "Zona secreta del escritorio: el PIN se ve mientras la mantienes pulsada y se oculta al soltar.",
         Zone(0.4f, 0.45f, 0.2f, 0.1f), false, "PIN",
     )
+    val homeRevealView = BoxSpec(
+        "homeRevealView", "Posición del número",
+        "Dónde se dibuja el PIN revelado. El texto se ajusta al tamaño de la caja.",
+        Zone(0.1f, 0.42f, 0.8f, 0.14f), false, "123456",
+    )
     val homeLock = BoxSpec(
-        "homeLock", "Bloquear",
-        "Vuelve a la pantalla de bloqueo (el PIN guardado se conserva).",
+        "homeLock", "Bloquear y reiniciar",
+        "Vuelve a la pantalla de bloqueo y reinicia el efecto (borra el PIN guardado).",
         null, true, "bloq.",
     )
 
-    fun forScreen(id: ScreenId): List<BoxSpec> = when (id) {
-        ScreenId.LOCK -> listOf(lockOpen)
-        ScreenId.PAD -> keys + listOf(padDots, padBack)
-        ScreenId.HOME -> listOf(homeReveal, homeLock)
+    /**
+     * Hasta tres máscaras de hora/fecha por pantalla (desactivadas por defecto). Las de hora corta
+     * (barra superior) llevan letra normal; las grandes, fina.
+     */
+    private fun maskSpecs(prefix: String, kinds: List<MaskKind>): List<BoxSpec> = kinds.mapIndexed { i, kind ->
+        BoxSpec(
+            "${prefix}Mask${i + 1}", "Máscara ${i + 1}",
+            "Tapa la hora o fecha fija de la captura y dibuja la real. Elige tipo, color, tamaño y fondo abajo.",
+            null, true, "máscara ${i + 1}",
+            maskDefault = MaskStyle(kind = kind, weight = if (kind == MaskKind.TIME_NOZERO || kind == MaskKind.TIME) 1 else 0),
+        )
     }
 
-    val all: List<BoxSpec> = ScreenId.entries.flatMap { forScreen(it) }
+    val lockMasks = maskSpecs("lock", listOf(MaskKind.TIME_STACKED, MaskKind.DATE, MaskKind.TIME_NOZERO))
+    val padMasks = maskSpecs("pad", listOf(MaskKind.TIME_NOZERO, MaskKind.TIME, MaskKind.DATE))
+    val homeMasks = maskSpecs("home", listOf(MaskKind.DATE, MaskKind.TIME_NOZERO, MaskKind.TIME))
+
+    /** Botones ocultos globales (se activan con pulsación larga). */
+    val settingsBox = BoxSpec(
+        "settingsBox", "Acceso a Ajustes",
+        "Pulsación larga aquí en cualquier pantalla abre Ajustes. Por defecto, esquina superior derecha.",
+        Zone(0.8f, 0f, 0.2f, 0.07f), false, "ajustes",
+    )
+    val resetBox = BoxSpec(
+        "resetBox", "Reiniciar efecto",
+        "Pulsación larga aquí en cualquier pantalla borra el PIN guardado y vuelve a la pantalla de bloqueo. Por defecto, esquina superior izquierda.",
+        Zone(0f, 0f, 0.2f, 0.07f), true, "reset",
+    )
+    val hidden = listOf(settingsBox, resetBox)
+
+    fun forScreen(id: ScreenId): List<BoxSpec> = when (id) {
+        ScreenId.LOCK -> listOf(lockOpen) + lockMasks
+        ScreenId.PAD -> keys + listOf(padDots, padBack) + padMasks
+        ScreenId.HOME -> listOf(homeReveal, homeRevealView, homeLock) + homeMasks
+    }
+
+    fun masksFor(id: ScreenId): List<BoxSpec> = when (id) {
+        ScreenId.LOCK -> lockMasks
+        ScreenId.HOME -> homeMasks
+        ScreenId.PAD -> padMasks
+    }
+
+    val all: List<BoxSpec> = ScreenId.entries.flatMap { forScreen(it) } + hidden
 
     fun hitOf(spec: BoxSpec): KeyHit? = when {
         spec.key == "keyDel" -> KeyHit.Delete
@@ -102,22 +198,41 @@ enum class FeedbackStyle(val label: String) {
 }
 
 /**
- * Ajustes del mago. `overrides` solo guarda las cajas que ha cambiado (null = desactivada).
+ * Ajustes del mago. `overrides` solo guarda las cajas que ha cambiado (null = desactivada);
+ * `maskOverrides`, los estilos de máscara cambiados.
  * `fbLight`: resalte claro (para teclados sobre fondo oscuro); si es falso, resalte oscuro (teclado claro).
  */
 data class AppSettings(
     val pinLength: Int = 6,
     val overrides: Map<String, Zone?> = emptyMap(),
+    val maskOverrides: Map<String, MaskStyle> = emptyMap(),
     val fbStyle: FeedbackStyle = FeedbackStyle.CIRCLE,
     val fbLight: Boolean = true,
     val fbIntensity: Float = 0.35f,
     /** Tinte ARGB del resalte; 0 = automático (blanco o negro según `fbLight`). */
     val fbTint: Long = 0L,
+    // Puntos del PIN: diámetro (fracción de la altura de la caja), separación (fracción del diámetro) y borde (fracción del radio).
+    val dotSize: Float = 0.72f,
+    val dotGap: Float = 0.3f,
+    val dotBorder: Float = 0.3f,
+    // PIN revelado: opacidad del fondo y color del número.
+    val revealBgAlpha: Float = 0.93f,
+    val revealColor: Long = 0xFFFFFFFFL,
+    // Modo atenuado de la pantalla de bloqueo.
+    val dimEnabled: Boolean = false,
+    val dimSeconds: Int = 5,
+    val dimLevel: Float = 0.55f,
+    val dimBlur: Int = 14,
+    // Duración de la pulsación larga de los botones ocultos (milisegundos).
+    val settingsHoldMs: Int = 800,
+    val resetHoldMs: Int = 800,
 ) {
     fun box(spec: BoxSpec): Zone? = if (overrides.containsKey(spec.key)) overrides[spec.key] else spec.default
     fun withBox(key: String, b: Zone?) = copy(overrides = overrides + (key to b))
-    fun resetBox(key: String) = copy(overrides = overrides - key)
-    fun resetBoxes(keys: Collection<String>) = copy(overrides = overrides - keys.toSet())
+    fun resetBox(key: String) = copy(overrides = overrides - key, maskOverrides = maskOverrides - key)
+    fun resetBoxes(keys: Collection<String>) = copy(overrides = overrides - keys.toSet(), maskOverrides = maskOverrides - keys.toSet())
+    fun mask(spec: BoxSpec): MaskStyle = maskOverrides[spec.key] ?: spec.maskDefault ?: MaskStyle()
+    fun withMask(key: String, m: MaskStyle) = copy(maskOverrides = maskOverrides + (key to m))
 }
 
 /** Qué tecla (y su caja) hay bajo un toque normalizado, o null. */
@@ -137,4 +252,41 @@ data class EffectState(val stage: Int = 0, val first: String = "") {
     /** Devuelve el nuevo estado y si el PIN desbloquea. */
     fun submit(pin: String): Pair<EffectState, Boolean> =
         if (stage == 0) EffectState(1, pin) to false else EffectState(2, first) to true
+}
+
+private val dayNames = listOf("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
+private val monthNames = listOf("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
+
+private fun two(n: Int) = if (n < 10) "0$n" else "$n"
+
+private fun hour12(h: Int) = if (h % 12 == 0) 12 else h % 12
+
+/** Líneas de texto de una máscara para un instante dado (formato 24 h, en español). */
+fun maskLines(kind: MaskKind, t: LocalDateTime): List<String> = when (kind) {
+    MaskKind.TIME -> listOf("${two(t.hour)}:${two(t.minute)}")
+    MaskKind.TIME_NOZERO -> listOf("${t.hour}:${two(t.minute)}")
+    MaskKind.TIME_12 -> listOf("${hour12(t.hour)}:${two(t.minute)}")
+    MaskKind.TIME_12_AMPM -> listOf("${hour12(t.hour)}:${two(t.minute)} ${if (t.hour < 12) "AM" else "PM"}")
+    MaskKind.TIME_STACKED -> listOf(two(t.hour), two(t.minute))
+    MaskKind.DATE -> listOf("${dayNames[t.dayOfWeek.ordinal]}, ${t.dayOfMonth} ${monthNames[t.monthNumber - 1]}")
+}
+
+/** Paleta de colores de texto y de fondo para máscaras y PIN revelado. */
+object Palette {
+    val text = listOf(
+        "Blanco" to 0xFFFFFFFFL,
+        "Negro" to 0xFF000000L,
+        "Verde Pixel" to 0xFFD2EB9BL,
+        "Azul claro" to 0xFFA8C7FAL,
+        "Gris claro" to 0xFFD0D0D0L,
+        "Gris oscuro" to 0xFF404040L,
+    )
+    val bg = listOf(
+        "Negro" to 0xFF000000L,
+        "Gris oscuro" to 0xFF2B2B2BL,
+        "Gris claro" to 0xFFE8E8E0L,
+        "Crema" to 0xFFFAF9EEL,
+        "Blanco" to 0xFFFFFFFFL,
+        "Azul oscuro" to 0xFF10243EL,
+    )
 }

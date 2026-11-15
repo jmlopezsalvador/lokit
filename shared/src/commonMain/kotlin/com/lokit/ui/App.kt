@@ -1,6 +1,8 @@
 package com.lokit.ui
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -25,16 +27,18 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Raíz Compose común (Android e iOS). */
 @Composable
@@ -56,7 +60,6 @@ fun LokitRoot(store: SettingsStore, blobs: BlobStore) {
                 effect = effect,
                 images = images,
                 onSettings = { settings = it; store.save(it) },
-                onEffect = { effect = it; store.saveEffect(it) },
                 onPickImage = { id, bytes ->
                     blobs.write(id.file, bytes)
                     images[id] = decodeImage(bytes)
@@ -92,10 +95,16 @@ private fun FakePhone(
     var entered by remember { mutableStateOf("") }
     var failTick by remember { mutableStateOf(0) }
     var reveal by remember { mutableStateOf(false) }
+    var lockActive by remember { mutableStateOf(false) } // pantalla de bloqueo "despierta" (modo atenuado)
+    var touchTick by remember { mutableStateOf(0) }
+    val holdConsumed = remember { BooleanArray(1) }
     val shake = remember { Animatable(0f) }
     val feedback = remember { KeyFeedback() }
     val effectNow by rememberUpdatedState(effect)
     val onEffectNow by rememberUpdatedState(onEffect)
+    val onOpenSettingsNow by rememberUpdatedState(onOpenSettings)
+    val now = rememberNow()
+    val measurer = rememberTextMeasurer()
 
     // Sacudida de los puntos cuando el PIN "falla".
     LaunchedEffect(failTick) {
@@ -119,16 +128,38 @@ private fun FakePhone(
         }
     }
 
+    // Modo atenuado: tras X segundos sin tocar, la pantalla de bloqueo vuelve a apagarse.
+    LaunchedEffect(screen, lockActive, touchTick, settings.dimEnabled, settings.dimSeconds) {
+        if (screen == ScreenId.LOCK && settings.dimEnabled && lockActive) {
+            delay(settings.dimSeconds * 1000L)
+            lockActive = false
+        }
+    }
+
+    val dimmed = screen == ScreenId.LOCK && settings.dimEnabled && !lockActive
+    val dimAlpha by animateFloatAsState(if (dimmed) settings.dimLevel else 0f, tween(350))
+    val blurDp by animateDpAsState(if (dimmed) settings.dimBlur.dp else 0.dp, tween(350))
+
+    /** Reinicia el efecto: borra el PIN guardado y vuelve a la pantalla de bloqueo apagada. */
+    fun resetAll() {
+        onEffectNow(EffectState())
+        entered = ""
+        reveal = false
+        lockActive = false
+        screen = ScreenId.LOCK
+    }
+
     fun onTap(nx: Float, ny: Float) {
-        if (reveal) { reveal = false; return }
         when (screen) {
-            ScreenId.LOCK -> if (settings.box(Specs.lockOpen)?.contains(nx, ny) == true) {
-                entered = ""
-                screen = ScreenId.PAD
+            ScreenId.LOCK -> when {
+                settings.dimEnabled && !lockActive -> { lockActive = true; touchTick++ }
+                settings.box(Specs.lockOpen)?.contains(nx, ny) == true -> { entered = ""; screen = ScreenId.PAD }
+                else -> touchTick++
             }
             ScreenId.PAD -> {
                 if (settings.box(Specs.padBack)?.contains(nx, ny) == true) {
                     entered = ""
+                    lockActive = false
                     screen = ScreenId.LOCK
                     return
                 }
@@ -138,30 +169,52 @@ private fun FakePhone(
                     null -> {}
                 }
             }
-            ScreenId.HOME -> {
-                if (settings.box(Specs.homeReveal)?.contains(nx, ny) == true) reveal = true
-                else if (settings.box(Specs.homeLock)?.contains(nx, ny) == true) screen = ScreenId.LOCK
-            }
+            ScreenId.HOME -> if (settings.box(Specs.homeLock)?.contains(nx, ny) == true) resetAll()
         }
     }
 
     Box(
-        Modifier.fillMaxSize().background(Color.Black).pointerInput(screen, settings, reveal) {
+        Modifier.fillMaxSize().background(Color.Black).pointerInput(screen, settings) {
             detectTapGestures(
-                // Acceso secreto a Ajustes: pulsación larga en la esquina superior izquierda.
-                onLongPress = { o -> if (o.x < size.width * 0.2f && o.y < size.height * 0.08f) onOpenSettings() },
                 onPress = { o ->
-                    // Resalte de la tecla mientras se mantiene pulsada.
-                    val key = if (screen == ScreenId.PAD) hitKey(settings, o.x / size.width, o.y / size.height) else null
-                    if (key != null) feedback.run(settings, key.second) { tryAwaitRelease() }
+                    holdConsumed[0] = false
+                    val nx = o.x / size.width
+                    val ny = o.y / size.height
+                    val onSettingsBox = settings.box(Specs.settingsBox)?.contains(nx, ny) == true
+                    val onResetBox = !onSettingsBox && settings.box(Specs.resetBox)?.contains(nx, ny) == true
+                    if (onSettingsBox || onResetBox) {
+                        // Botones ocultos: acción tras mantener la pulsación el tiempo configurado.
+                        val ms = if (onSettingsBox) settings.settingsHoldMs else settings.resetHoldMs
+                        val released = withTimeoutOrNull(ms.toLong()) { tryAwaitRelease() }
+                        if (released == null) {
+                            holdConsumed[0] = true
+                            if (onSettingsBox) onOpenSettingsNow() else resetAll()
+                            tryAwaitRelease()
+                        }
+                    } else if (screen == ScreenId.HOME && settings.box(Specs.homeReveal)?.contains(nx, ny) == true) {
+                        // El PIN se ve solo mientras se mantiene pulsado.
+                        reveal = true
+                        try {
+                            tryAwaitRelease()
+                        } finally {
+                            reveal = false
+                        }
+                    } else if (screen == ScreenId.PAD) {
+                        // Resalte de la tecla mientras se mantiene pulsada.
+                        val key = hitKey(settings, nx, ny)
+                        if (key != null) feedback.run(settings, key.second) { tryAwaitRelease() }
+                    }
                 },
-                onTap = { o -> onTap(o.x / size.width, o.y / size.height) },
+                onTap = { o ->
+                    if (holdConsumed[0]) holdConsumed[0] = false else onTap(o.x / size.width, o.y / size.height)
+                },
             )
         },
     ) {
         val img = images[screen]
         if (img != null) {
-            Image(img, null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+            val blurMod = if (blurDp > 0.dp) Modifier.blur(blurDp, BlurredEdgeTreatment.Rectangle) else Modifier
+            Image(img, null, Modifier.fillMaxSize().then(blurMod), contentScale = ContentScale.FillBounds)
         } else {
             Column(
                 Modifier.fillMaxSize().background(Color(0xFF14181F)).padding(32.dp),
@@ -170,7 +223,7 @@ private fun FakePhone(
             ) {
                 Text("Sin captura para «${screen.title}»", color = Color.White, textAlign = TextAlign.Center)
                 Text(
-                    "Abre Ajustes (también con pulsación larga en la esquina superior izquierda) y elige una captura.",
+                    "Abre Ajustes (pulsación larga en la esquina superior derecha) y elige una captura.",
                     color = Color(0xFF9AA4B2), fontSize = 13.sp, textAlign = TextAlign.Center,
                     modifier = Modifier.padding(vertical = 12.dp),
                 )
@@ -178,32 +231,31 @@ private fun FakePhone(
             }
         }
 
+        // Máscaras con la fecha y la hora reales (tapan las fijas de la captura).
+        for (spec in Specs.masksFor(screen)) {
+            val z = settings.box(spec) ?: continue
+            val st = settings.mask(spec)
+            MaskLayer(z, st, img, maskLines(st.kind, now))
+        }
+
         if (screen == ScreenId.PAD) {
             Canvas(Modifier.fillMaxSize()) { feedback.draw(this, settings) }
             val dots = settings.box(Specs.padDots)
             if (dots != null) {
+                MaskLayer(dots, settings.mask(Specs.padDots), img, null)
                 Canvas(Modifier.fillMaxSize()) {
-                    val n = settings.pinLength
-                    val left = dots.x * size.width
-                    val top = dots.y * size.height
-                    val wPx = dots.w * size.width
-                    val hPx = dots.h * size.height
-                    val step = wPx / n
-                    val r = minOf(hPx / 2f, step / 2.6f)
-                    // Puntos oscuros sobre teclados claros, claros sobre teclados oscuros.
-                    val dot = if (settings.fbLight) Color.White else Color(0xFF1B1C18)
-                    for (i in 0 until n) {
-                        val c = Offset(left + step * (i + 0.5f) + shake.value * size.width * 0.03f, top + hPx / 2f)
-                        if (i < entered.length) drawCircle(dot, r, c)
-                        else drawCircle(dot.copy(alpha = 0.35f), r, c, style = Stroke(width = r * 0.3f))
-                    }
+                    drawPinDots(dots, settings, entered.length, shake.value * size.width * 0.03f)
                 }
             }
         }
 
+        // Modo atenuado: toda la escena baja de intensidad.
+        if (dimAlpha > 0.001f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = dimAlpha)))
+
         if (reveal) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.93f)), contentAlignment = Alignment.Center) {
-                Text(effect.first.ifEmpty { "—" }, color = Color.White, fontSize = 56.sp)
+            val view = settings.box(Specs.homeRevealView) ?: Specs.homeRevealView.default!!
+            Canvas(Modifier.fillMaxSize()) {
+                drawReveal(measurer, view, settings, effect.first.ifEmpty { "—" })
             }
         }
     }

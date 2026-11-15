@@ -18,21 +18,42 @@ interface BlobStore {
 }
 
 class SettingsStore(private val prefs: KeyValueStore) {
+    private fun float(key: String, default: Float, lo: Float, hi: Float) =
+        (prefs.getString(key)?.toFloatOrNull() ?: default).coerceIn(lo, hi)
+
+    private fun int(key: String, default: Int, lo: Int, hi: Int) = prefs.getLong(key, default.toLong()).toInt().coerceIn(lo, hi)
+
     fun load(): AppSettings {
         val overrides = HashMap<String, Zone?>()
+        val masks = HashMap<String, MaskStyle>()
         for (spec in Specs.all) {
-            val raw = prefs.getString("box_${spec.key}") ?: continue
-            if (raw == DEFAULT_MARK) continue
-            overrides[spec.key] = if (raw.isEmpty()) null else Zone.decode(raw) ?: continue
+            val raw = prefs.getString("box_${spec.key}")
+            if (raw != null && raw != DEFAULT_MARK) {
+                if (raw.isEmpty()) overrides[spec.key] = null else Zone.decode(raw)?.let { overrides[spec.key] = it }
+            }
+            MaskStyle.decode(prefs.getString("mask_${spec.key}"))?.let { masks[spec.key] = it }
         }
-        val style = FeedbackStyle.entries.firstOrNull { it.name == prefs.getString("fbStyle") } ?: FeedbackStyle.CIRCLE
+        val d = AppSettings()
+        val style = FeedbackStyle.entries.firstOrNull { it.name == prefs.getString("fbStyle") } ?: d.fbStyle
         return AppSettings(
-            pinLength = prefs.getLong("pinLength", 6L).toInt().coerceIn(3, 10),
+            pinLength = int("pinLength", d.pinLength, 3, 10),
             overrides = overrides,
+            maskOverrides = masks,
             fbStyle = style,
-            fbLight = prefs.getBoolean("fbLight", true),
-            fbTint = prefs.getLong("fbTint", 0L),
-            fbIntensity = (prefs.getString("fbIntensity")?.toFloatOrNull() ?: 0.35f).coerceIn(0.05f, 0.9f),
+            fbLight = prefs.getBoolean("fbLight", d.fbLight),
+            fbTint = prefs.getLong("fbTint", d.fbTint),
+            fbIntensity = float("fbIntensity", d.fbIntensity, 0.05f, 0.9f),
+            dotSize = float("dotSize", d.dotSize, 0.2f, 1.5f),
+            dotGap = float("dotGap", d.dotGap, 0f, 3f),
+            dotBorder = float("dotBorder", d.dotBorder, 0.05f, 1f),
+            revealBgAlpha = float("revealBgAlpha", d.revealBgAlpha, 0f, 1f),
+            revealColor = prefs.getLong("revealColor", d.revealColor),
+            dimEnabled = prefs.getBoolean("dimEnabled", d.dimEnabled),
+            dimSeconds = int("dimSeconds", d.dimSeconds, 1, 120),
+            dimLevel = float("dimLevel", d.dimLevel, 0f, 0.95f),
+            dimBlur = int("dimBlur", d.dimBlur, 0, 40),
+            settingsHoldMs = int("settingsHoldMs", d.settingsHoldMs, 200, 5000),
+            resetHoldMs = int("resetHoldMs", d.resetHoldMs, 200, 5000),
         )
     }
 
@@ -42,9 +63,21 @@ class SettingsStore(private val prefs: KeyValueStore) {
         prefs.putBoolean("fbLight", s.fbLight)
         prefs.putLong("fbTint", s.fbTint)
         prefs.putString("fbIntensity", s.fbIntensity.toString())
+        prefs.putString("dotSize", s.dotSize.toString())
+        prefs.putString("dotGap", s.dotGap.toString())
+        prefs.putString("dotBorder", s.dotBorder.toString())
+        prefs.putString("revealBgAlpha", s.revealBgAlpha.toString())
+        prefs.putLong("revealColor", s.revealColor)
+        prefs.putBoolean("dimEnabled", s.dimEnabled)
+        prefs.putLong("dimSeconds", s.dimSeconds.toLong())
+        prefs.putString("dimLevel", s.dimLevel.toString())
+        prefs.putLong("dimBlur", s.dimBlur.toLong())
+        prefs.putLong("settingsHoldMs", s.settingsHoldMs.toLong())
+        prefs.putLong("resetHoldMs", s.resetHoldMs.toLong())
         for (spec in Specs.all) {
             val raw = if (s.overrides.containsKey(spec.key)) (s.overrides[spec.key]?.encode() ?: "") else DEFAULT_MARK
             prefs.putString("box_${spec.key}", raw)
+            prefs.putString("mask_${spec.key}", s.maskOverrides[spec.key]?.encode() ?: DEFAULT_MARK)
         }
     }
 
