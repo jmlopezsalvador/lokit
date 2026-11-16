@@ -134,11 +134,13 @@ class SettingsStoreTest {
         val old = MaskStyle.decode("DATE|1|NONE|2|1.0|1")!!
         assertEquals(MaskKind.DATE.defaultSize, old.size)
         assertEquals(0, old.weight)
+        assertEquals(BgMode.IMAGE, MaskStyle.decode("DATE|1|AUTO|2|1.0|1")!!.bgMode) // AUTO antiguo -> imagen
+        assertEquals(BgMode.NONE, MaskStyle.decode("DATE|1|NONE|2|1.0|1")!!.bgMode)
         assertEquals(2, MaskStyle.decode(MaskStyle(weight = 2).encode())!!.weight)
     }
 
     @Test fun maskStyleCodec() {
-        val m = MaskStyle(MaskKind.DATE, 0xFF112233L, BgMode.SOLID, 0xFFAABBCCL, 0.04f, 2, 1, 0.2f, 3)
+        val m = MaskStyle(MaskKind.DATE, 0xFF112233L, BgMode.IMAGE, 0xFFAABBCCL, 0.04f, 2, 1, 0.2f, 3)
         assertEquals(m, MaskStyle.decode(m.encode()))
         assertNull(MaskStyle.decode("basura"))
         assertNull(MaskStyle.decode(null))
@@ -147,7 +149,7 @@ class SettingsStoreTest {
     @Test fun masksAddUpdateRemoveAndPersist() {
         val store = SettingsStore(MemoryStore())
         assertTrue(AppSettings().masksOf(ScreenId.LOCK).isEmpty())
-        val st1 = MaskStyle(MaskKind.TIME_12, 0xFF000000L, BgMode.AUTO, 0xFF000000L, 0.03f, 0)
+        val st1 = MaskStyle(MaskKind.TIME_12, 0xFF000000L, BgMode.NONE, 0xFF000000L, 0.03f, 0)
         val (s1, a) = AppSettings().addMask(ScreenId.LOCK, Zone(0.1f, 0.3f, 0.8f, 0.2f), st1)
         val (s2, b) = s1.addMask(ScreenId.LOCK, Zone(0.2f, 0.1f, 0.3f, 0.05f), MaskStyle(MaskKind.DATE_LONG))
         assertEquals(listOf(1, 2), listOf(a.id, b.id))

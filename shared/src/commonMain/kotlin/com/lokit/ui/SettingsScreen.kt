@@ -91,21 +91,26 @@ fun SettingsScreen(
     settings: AppSettings,
     effect: EffectState,
     images: Map<ScreenId, ImageBitmap?>,
+    cleans: Map<ScreenId, ImageBitmap?>,
     onSettings: (AppSettings) -> Unit,
     onPickImage: (ScreenId, ByteArray) -> Unit,
     onRemoveImage: (ScreenId) -> Unit,
+    onPickClean: (ScreenId, ByteArray) -> Unit,
+    onRemoveClean: (ScreenId) -> Unit,
     onClose: () -> Unit,
 ) {
     var target by remember { mutableStateOf<ScreenId?>(null) }
+    var targetClean by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<ScreenId?>(null) }
     var editingHidden by remember { mutableStateOf(false) }
-    val pick = rememberImagePicker { bytes -> target?.let { onPickImage(it, bytes) } }
+    val pick = rememberImagePicker { bytes -> target?.let { if (targetClean) onPickClean(it, bytes) else onPickImage(it, bytes) } }
 
     val editId = editing
     if (editId != null || editingHidden) {
         BoxEditor(
             title = if (editId != null) editId.title else "Botones ocultos",
             image = images[editId ?: ScreenId.LOCK],
+            clean = editId?.let { cleans[it] },
             specs = if (editId != null) Specs.forScreen(editId) else Specs.hidden,
             screenId = editId,
             settings = settings,
@@ -201,9 +206,17 @@ fun SettingsScreen(
                     Text(id.title, fontSize = 16.sp)
                     Text(if (images[id] != null) "Captura cargada" else "Sin captura", fontSize = 13.sp)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { target = id; pick() }) { Text("Captura") }
+                        Button(onClick = { target = id; targetClean = false; pick() }) { Text("Captura") }
                         OutlinedButton(onClick = { onRemoveImage(id) }, enabled = images[id] != null) { Text("Quitar") }
                         OutlinedButton(onClick = { editing = id }) { Text("Cajas") }
+                    }
+                    Text(
+                        if (cleans[id] != null) "Imagen de fondo limpia cargada" else "Sin imagen de fondo limpia (las máscaras con fondo no tapan nada)",
+                        fontSize = 12.sp, color = Color(0xFF9AA4B2),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { target = id; targetClean = true; pick() }) { Text("Fondo limpio") }
+                        OutlinedButton(onClick = { onRemoveClean(id) }, enabled = cleans[id] != null) { Text("Quitar fondo") }
                     }
                 }
             }
@@ -247,6 +260,7 @@ private class Ent(val key: String, val zone: Zone, val tag: String, val color: C
 private fun BoxEditor(
     title: String,
     image: ImageBitmap?,
+    clean: ImageBitmap?,
     specs: List<BoxSpec>,
     screenId: ScreenId?,
     settings: AppSettings,
@@ -294,10 +308,10 @@ private fun BoxEditor(
 
         // Vista previa real de las máscaras de hora/fecha, los puntos del PIN y el número revelado.
         if (!testing) {
-            for (m in masks) key(m.id) { MaskLayer(m.zone, m.style, image, maskLines(m.style.kind, now), debounceMs = 150L) }
+            for (m in masks) key(m.id) { MaskLayer(m.zone, m.style, clean, maskLines(m.style.kind, now)) }
             if (isPad) {
                 current.box(Specs.padDots)?.let { z ->
-                    MaskLayer(z, current.mask(Specs.padDots), image, null, debounceMs = 150L)
+                    MaskLayer(z, current.mask(Specs.padDots), clean, null)
                     Canvas(Modifier.fillMaxSize()) { drawPinDots(z, current, 3, 0f) }
                 }
             }
@@ -488,11 +502,11 @@ private fun BoxEditor(
                             FilterChip(selected = st.bgMode == m, onClick = { updMask { it.copy(bgMode = m) } }, label = { Text(m.label) })
                         }
                     }
-                    if (st.bgMode == BgMode.SOLID) ColorChips(Palette.bg, st.bgColor) { c -> updMask { it.copy(bgColor = c) } }
-                    if (st.bgMode == BgMode.AUTO) {
+                    if (st.bgMode == BgMode.IMAGE) {
                         Text(
-                            "Copia de la propia captura la zona vecina que mejor encaja (nítida, con la misma textura). Ajusta la caja para que cubra justo lo que quieres tapar.",
-                            fontSize = 11.sp, color = Color(0xFFB0B8C4),
+                            if (clean != null) "Tapa con el mismo trozo de la imagen de fondo limpia de esta pantalla (se carga en Ajustes con «Fondo limpio»)."
+                            else "Falta la imagen de fondo limpia de esta pantalla: cárgala en Ajustes con «Fondo limpio».",
+                            fontSize = 11.sp, color = if (clean != null) Color(0xFFB0B8C4) else Color(0xFFFFB74D),
                         )
                     }
                 }
@@ -526,9 +540,6 @@ private fun BoxEditor(
                                     label = { Text(if (m == BgMode.NONE) "Sin máscara" else m.label) },
                                 )
                             }
-                        }
-                        if (st.bgMode == BgMode.SOLID) {
-                            ColorChips(Palette.bg, st.bgColor) { current = current.withMask(spec.key, st.copy(bgColor = it)) }
                         }
                     }
 

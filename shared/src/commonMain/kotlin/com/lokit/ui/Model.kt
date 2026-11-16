@@ -18,10 +18,10 @@ data class Zone(val x: Float, val y: Float, val w: Float, val h: Float) {
 }
 
 /** Las tres pantallas que imita la app. Cada una lleva una captura (fichero `file`). */
-enum class ScreenId(val title: String, val file: String) {
-    LOCK("Pantalla de bloqueo", "lock.img"),
-    PAD("Teclado de PIN", "pad.img"),
-    HOME("Escritorio", "home.img"),
+enum class ScreenId(val title: String, val file: String, val cleanFile: String) {
+    LOCK("Pantalla de bloqueo", "lock.img", "lock_clean.img"),
+    PAD("Teclado de PIN", "pad.img", "pad_clean.img"),
+    HOME("Escritorio", "home.img", "home_clean.img"),
 }
 
 /** Qué se dibuja en una máscara: una hora o una fecha, con su formato. */
@@ -39,12 +39,10 @@ enum class MaskKind(val label: String, val date: Boolean = false) {
     val defaultSize: Float get() = if (this == TIME_STACKED) 0.085f else 0.022f
 }
 
-/** Fondo de una máscara: con qué se tapa lo que trae la captura. */
+/** Fondo de una máscara: transparente, o el trozo equivalente de la captura «limpia» (sin hora, fecha ni iconos). */
 enum class BgMode(val label: String) {
     NONE("Transparente"),
-    AUTO("Imagen (copia del entorno)"),
-    SMOOTH("Degradado de los bordes"),
-    SOLID("Color sólido"),
+    IMAGE("Imagen de fondo limpia"),
 }
 
 /**
@@ -56,7 +54,7 @@ enum class BgMode(val label: String) {
 data class MaskStyle(
     val kind: MaskKind = MaskKind.TIME,
     val textColor: Long = 0xFFFFFFFFL,
-    val bgMode: BgMode = BgMode.AUTO,
+    val bgMode: BgMode = BgMode.IMAGE,
     val bgColor: Long = 0xFF000000L,
     val size: Float = 0.022f,
     val align: Int = 1,
@@ -77,7 +75,7 @@ data class MaskStyle(
             return MaskStyle(
                 kind = kind,
                 textColor = p[1].toLongOrNull() ?: return null,
-                bgMode = BgMode.entries.firstOrNull { it.name == p[2] } ?: return null,
+                bgMode = if (p[2] == "NONE") BgMode.NONE else BgMode.IMAGE, // formatos antiguos (auto, degradado, sólido) -> imagen
                 bgColor = p[3].toLongOrNull() ?: return null,
                 size = size,
                 align = p[5].toIntOrNull() ?: return null,

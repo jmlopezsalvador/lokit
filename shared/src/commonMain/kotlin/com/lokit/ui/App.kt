@@ -48,10 +48,14 @@ fun LokitRoot(store: SettingsStore, blobs: BlobStore) {
     var settings by remember { mutableStateOf(store.load()) }
     var effect by remember { mutableStateOf(store.loadEffect()) }
     val images = remember { mutableStateMapOf<ScreenId, ImageBitmap?>() }
+    val cleans = remember { mutableStateMapOf<ScreenId, ImageBitmap?>() }
     var inSettings by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        for (id in ScreenId.entries) blobs.read(id.file)?.let { images[id] = decodeImage(it) }
+        for (id in ScreenId.entries) {
+            blobs.read(id.file)?.let { images[id] = decodeImage(it) }
+            blobs.read(id.cleanFile)?.let { cleans[id] = decodeImage(it) }
+        }
     }
 
     MaterialTheme(colorScheme = darkColorScheme()) {
@@ -60,6 +64,7 @@ fun LokitRoot(store: SettingsStore, blobs: BlobStore) {
                 settings = settings,
                 effect = effect,
                 images = images,
+                cleans = cleans,
                 onSettings = { settings = it; store.save(it) },
                 onPickImage = { id, bytes ->
                     blobs.write(id.file, bytes)
@@ -69,6 +74,14 @@ fun LokitRoot(store: SettingsStore, blobs: BlobStore) {
                     blobs.delete(id.file)
                     images[id] = null
                 },
+                onPickClean = { id, bytes ->
+                    blobs.write(id.cleanFile, bytes)
+                    cleans[id] = decodeImage(bytes)
+                },
+                onRemoveClean = { id ->
+                    blobs.delete(id.cleanFile)
+                    cleans[id] = null
+                },
                 onClose = { inSettings = false },
             )
         } else {
@@ -76,6 +89,7 @@ fun LokitRoot(store: SettingsStore, blobs: BlobStore) {
                 settings = settings,
                 effect = effect,
                 images = images,
+                cleans = cleans,
                 onEffect = { effect = it; store.saveEffect(it) },
                 onOpenSettings = { inSettings = true },
             )
@@ -89,6 +103,7 @@ private fun FakePhone(
     settings: AppSettings,
     effect: EffectState,
     images: Map<ScreenId, ImageBitmap?>,
+    cleans: Map<ScreenId, ImageBitmap?>,
     onEffect: (EffectState) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -215,7 +230,13 @@ private fun FakePhone(
         val img = images[screen]
         if (img != null) {
             val blurMod = if (blurDp > 0.dp) Modifier.blur(blurDp, BlurredEdgeTreatment.Rectangle) else Modifier
-            Image(img, null, Modifier.fillMaxSize().then(blurMod), contentScale = ContentScale.FillBounds)
+            // La captura y los fondos de las máscaras se desenfocan juntos; el texto real queda nítido encima.
+            Box(Modifier.fillMaxSize().then(blurMod)) {
+                Image(img, null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+                for (m in settings.masksOf(screen)) {
+                    key(m.id) { MaskLayer(m.zone, m.style, cleans[screen], null) }
+                }
+            }
         } else {
             Column(
                 Modifier.fillMaxSize().background(Color(0xFF14181F)).padding(32.dp),
@@ -234,14 +255,14 @@ private fun FakePhone(
 
         // Máscaras con la fecha y la hora reales (tapan las fijas de la captura).
         for (m in settings.masksOf(screen)) {
-            key(m.id) { MaskLayer(m.zone, m.style, img, maskLines(m.style.kind, now)) }
+            key(m.id) { MaskLayer(m.zone, m.style, cleans[screen], maskLines(m.style.kind, now), showBg = false) }
         }
 
         if (screen == ScreenId.PAD) {
             Canvas(Modifier.fillMaxSize()) { feedback.draw(this, settings) }
             val dots = settings.box(Specs.padDots)
             if (dots != null) {
-                MaskLayer(dots, settings.mask(Specs.padDots), img, null)
+                MaskLayer(dots, settings.mask(Specs.padDots), cleans[screen], null)
                 Canvas(Modifier.fillMaxSize()) {
                     drawPinDots(dots, settings, entered.length, shake.value * size.width * 0.03f)
                 }

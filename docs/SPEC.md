@@ -27,7 +27,7 @@ App de magia para Android e iOS (un solo código KMP). Efecto: **adivinar/transm
 10. R10 — Android e iOS con el mismo código.
 11. R11 — Feedback visual configurable al pulsar cada tecla, para imitar el del móvil del mago.
 
-12. R12 — Máscaras de hora y fecha reales, libres: en el editor de cajas de cada pantalla se pulsa «＋ Añadir máscara» (sin límite) y se elige Valor (hora o fecha), Formato (hora 24 h, 24 h sin cero, 12 h, 12 h con AM/PM, vertical en dos líneas; fecha corta, normal o larga), posición del texto en la caja, tipo de letra, grosor, tamaño y separación entre caracteres, color y fondo (transparente, imagen = copia nítida de la zona vecina de la propia captura, degradado de los bordes, color sólido). El tamaño del texto es absoluto: cambiar la caja no lo altera. Se eliminan con «Eliminar máscara». Las cajas se seleccionan con un toque. Las máscaras fijas de versiones antiguas se migran solas.
+12. R12 — Máscaras de hora y fecha reales, libres: en el editor de cajas de cada pantalla se pulsa «＋ Añadir máscara» (sin límite) y se elige Valor (hora o fecha), Formato (hora 24 h, 24 h sin cero, 12 h, 12 h con AM/PM, vertical en dos líneas; fecha corta, normal o larga), posición del texto en la caja, tipo de letra, grosor, tamaño y separación entre caracteres, color y fondo: transparente o imagen (el mismo trozo de la «imagen de fondo limpia» de esa pantalla, una captura sin hora, fecha ni iconos que se carga en Ajustes con «Fondo limpio»). El tamaño del texto es absoluto: cambiar la caja no lo altera. Se eliminan con «Eliminar máscara». Las cajas se seleccionan con un toque. Las máscaras fijas de versiones antiguas se migran solas.
 13. R13 — Modo atenuado del bloqueo: arranca desenfocado y oscuro; un toque lo despierta; sin tocar durante X s vuelve a apagarse; con la pantalla despierta, otro toque abre el teclado. Oscuridad, desenfoque y segundos configurables.
 14. R14 — Puntos del PIN configurables: tamaño, separación, grosor del borde y máscara opcional que tapa los del pantallazo.
 
@@ -37,7 +37,7 @@ App de magia para Android e iOS (un solo código KMP). Efecto: **adivinar/transm
 - Resalte al pulsar (R11): estilos Ninguno / Círculo (iPhone) / Píldora / Cuadrado redondeado (Pixel) / Onda (Android clásico, Samsung), claro u oscuro, tinte (automático, verde Pixel, azul, rosa, gris) e intensidad; se mezcla con la captura (Multiplicar/Trama) para no tapar el número; se prueba en el editor. Limitación: el círculo original de la tecla asoma bajo el cuadrado.
 - Tras desbloquear se muestra el escritorio falso; el reinicio es manual desde Ajustes.
 
-- El desenfoque del modo atenuado solo se ve en Android 12+ y en iOS. El fondo «Imagen» copia una región vecina de la captura: con cajas muy grandes (que ocupan casi todo el alto o el ancho) no hay región libre y se usa el degradado; conviene cajas ajustadas al texto.
+- El desenfoque del modo atenuado solo se ve en Android 12+ y en iOS. El fondo «Imagen» necesita la imagen de fondo limpia de la pantalla, hecha con el mismo móvil y a la misma resolución que la captura.
 
 ## Preguntas abiertas
 - ¿Hace falta vibración/sonido al fallar el PIN?
