@@ -7,12 +7,16 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -28,6 +32,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.graphics.Color
@@ -50,6 +55,20 @@ fun LokitRoot(store: SettingsStore, blobs: BlobStore) {
     val images = remember { mutableStateMapOf<ScreenId, ImageBitmap?>() }
     val cleans = remember { mutableStateMapOf<ScreenId, ImageBitmap?>() }
     var inSettings by remember { mutableStateOf(false) }
+    // Modal de arranque: elegir código o patrón (configurable en Ajustes).
+    var chooser by remember { mutableStateOf(settings.askAtStart) }
+    // Guía rápida de arranque: sale primero; al cerrarla aparece, si procede, el modal de elegir tipo.
+    var guide by remember { mutableStateOf(settings.guideAtStart) }
+
+    /** Cambiar de tipo de desbloqueo reinicia el efecto: lo guardado (PIN o patrón) ya no vale para el otro tipo. */
+    fun applySettings(new: AppSettings) {
+        if (new.unlockMode != settings.unlockMode) {
+            effect = EffectState()
+            store.saveEffect(effect)
+        }
+        settings = new
+        store.save(new)
+    }
 
     LaunchedEffect(Unit) {
         for (id in ScreenId.entries) {
@@ -65,7 +84,7 @@ fun LokitRoot(store: SettingsStore, blobs: BlobStore) {
                 effect = effect,
                 images = images,
                 cleans = cleans,
-                onSettings = { settings = it; store.save(it) },
+                onSettings = { applySettings(it) },
                 onPickImage = { id, bytes ->
                     blobs.write(id.file, bytes)
                     images[id] = decodeImage(bytes)
@@ -93,6 +112,32 @@ fun LokitRoot(store: SettingsStore, blobs: BlobStore) {
                 onEffect = { effect = it; store.saveEffect(it) },
                 onOpenSettings = { inSettings = true },
             )
+            if (guide) {
+                GuideDialog(showAtStart = settings.guideAtStart) { show ->
+                    if (show != settings.guideAtStart) applySettings(settings.copy(guideAtStart = show))
+                    guide = false
+                }
+            } else if (chooser) {
+                AlertDialog(
+                    onDismissRequest = {},
+                    title = { Text("¿Cómo se desbloquea?") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            for (m in listOf(UnlockMode.PIN to "Código (PIN)", UnlockMode.PATTERN to "Patrón")) {
+                                Button(
+                                    onClick = { applySettings(settings.copy(unlockMode = m.first)); chooser = false },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) { Text(m.second) }
+                            }
+                            Text(
+                                if (settings.unlockMode == UnlockMode.PIN) "Ahora: código (PIN)" else "Ahora: patrón",
+                                fontSize = 12.sp, color = Color(0xFF9AA4B2),
+                            )
+                        }
+                    },
+                    confirmButton = {},
+                )
+            }
         }
     }
 }
@@ -109,6 +154,8 @@ private fun FakePhone(
 ) {
     var screen by remember { mutableStateOf(ScreenId.LOCK) }
     var entered by remember { mutableStateOf("") }
+    var patternPath by remember { mutableStateOf(emptyList<Int>()) }
+    var patternFinger by remember { mutableStateOf<Offset?>(null) }
     var failTick by remember { mutableStateOf(0) }
     var reveal by remember { mutableStateOf(false) }
     var lockActive by remember { mutableStateOf(false) } // pantalla de bloqueo "despierta" (modo atenuado)
@@ -121,6 +168,7 @@ private fun FakePhone(
     val onOpenSettingsNow by rememberUpdatedState(onOpenSettings)
     val now = rememberNow()
     val measurer = rememberTextMeasurer()
+    val vibrate = rememberVibrator()
 
     // Sacudida de los puntos cuando el PIN "falla".
     LaunchedEffect(failTick) {
@@ -133,15 +181,23 @@ private fun FakePhone(
         }
     }
 
-    // Al completar el PIN: el primero se guarda y falla; los siguientes desbloquean.
-    LaunchedEffect(entered, settings.pinLength) {
-        if (entered.length >= settings.pinLength) {
-            delay(180)
-            val (next, unlocked) = effectNow.submit(entered)
-            onEffectNow(next)
-            entered = ""
-            if (unlocked) screen = ScreenId.HOME else failTick++
-        }
+    // Intento de desbloqueo: el primero se guarda; fallan hasta el último intento, que desbloquea.
+    fun attempt(value: String) {
+        val (next, unlocked) = effectNow.submit(value, settings.attempts)
+        onEffectNow(next)
+        entered = ""
+        patternPath = emptyList()
+        if (unlocked) screen = ScreenId.HOME else { failTick++; vibrate(1) } // fallo: una vibración
+    }
+
+    // Tecla OK del PIN: solo vale con el mínimo de dígitos.
+    fun submitPin() {
+        if (entered.length >= settings.minDigits) attempt(entered)
+    }
+
+    // Al soltar el dedo en el patrón: solo vale con el mínimo de puntos; si no, se borra el trazo.
+    fun submitPattern(path: List<Int>) {
+        if (path.size >= settings.patternMin) attempt(Pattern.encode(settings.patternGrid, path)) else patternPath = emptyList()
     }
 
     // Modo atenuado: tras X segundos sin tocar, la pantalla de bloqueo vuelve a apagarse.
@@ -160,6 +216,7 @@ private fun FakePhone(
     fun resetAll() {
         onEffectNow(EffectState())
         entered = ""
+        patternPath = emptyList()
         reveal = false
         lockActive = false
         screen = ScreenId.LOCK
@@ -169,20 +226,27 @@ private fun FakePhone(
         when (screen) {
             ScreenId.LOCK -> when {
                 settings.dimEnabled && !lockActive -> { lockActive = true; touchTick++ }
-                settings.box(Specs.lockOpen)?.contains(nx, ny) == true -> { entered = ""; screen = ScreenId.PAD }
+                settings.box(Specs.lockOpen)?.contains(nx, ny) == true -> {
+                    entered = ""
+                    screen = if (settings.unlockMode == UnlockMode.PATTERN) ScreenId.PATTERN else ScreenId.PAD
+                }
                 else -> touchTick++
             }
-            ScreenId.PAD -> {
+            ScreenId.PAD, ScreenId.PATTERN -> {
                 if (settings.box(Specs.padBack)?.contains(nx, ny) == true) {
                     entered = ""
+                    patternPath = emptyList()
                     lockActive = false
                     screen = ScreenId.LOCK
                     return
                 }
-                when (val hit = hitKey(settings, nx, ny)?.first) {
-                    is KeyHit.Digit -> if (entered.length < settings.pinLength) entered += hit.d
-                    KeyHit.Delete -> entered = entered.dropLast(1)
-                    null -> {}
+                if (screen == ScreenId.PAD) {
+                    when (val hit = hitKey(settings, nx, ny)?.first) {
+                        is KeyHit.Digit -> if (entered.length < settings.maxDigits) entered += hit.d
+                        KeyHit.Delete -> entered = entered.dropLast(1)
+                        KeyHit.Ok -> submitPin()
+                        null -> {}
+                    }
                 }
             }
             ScreenId.HOME -> if (settings.box(Specs.homeLock)?.contains(nx, ny) == true) resetAll()
@@ -204,6 +268,7 @@ private fun FakePhone(
                         val released = withTimeoutOrNull(ms.toLong()) { tryAwaitRelease() }
                         if (released == null) {
                             holdConsumed[0] = true
+                            vibrate(2) // doble vibración al activar el botón oculto
                             if (onSettingsBox) onOpenSettingsNow() else resetAll()
                             tryAwaitRelease()
                         }
@@ -269,13 +334,58 @@ private fun FakePhone(
             }
         }
 
+        // Modo patrón: la caja tapa la rejilla de la captura y la app dibuja la suya; el dedo traza el patrón.
+        if (screen == ScreenId.PATTERN) {
+            val z = settings.box(Specs.padPattern)
+            if (z != null) {
+                MaskLayer(z, settings.mask(Specs.padPattern), cleans[screen], null)
+                Canvas(Modifier.fillMaxSize()) { drawPatternPad(z, settings, patternPath, patternFinger) }
+                Box(
+                    Modifier.fillMaxSize().pointerInput(z, settings) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val w = size.width.toFloat()
+                            val h = size.height.toFloat()
+                            // Un toque fuera de la rejilla no es para el patrón: lo recibe el resto (p. ej. el botón atrás).
+                            if (!z.contains(down.position.x / w, down.position.y / h)) return@awaitEachGesture
+                            down.consume()
+                            val n = settings.patternGrid
+                            // La rejilla tiene tamaño propio (ajustes): la caja solo la centra y marca la zona táctil.
+                            val geo = patternGeometry(settings, z, w, h)
+                            var path = emptyList<Int>()
+                            fun touch(o: Offset) {
+                                val node = geo.nodeAt(o.x, o.y)
+                                if (node >= 0) path = Pattern.extend(path, node, n)
+                                patternPath = path
+                                patternFinger = o
+                            }
+                            touch(down.position)
+                            while (true) {
+                                val ch = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                                ch.consume()
+                                if (!ch.pressed) break
+                                touch(ch.position)
+                            }
+                            patternFinger = null
+                            submitPattern(path)
+                        }
+                    },
+                )
+            }
+        }
+
         // Modo atenuado: toda la escena baja de intensidad.
         if (dimAlpha > 0.001f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = dimAlpha)))
 
         if (reveal) {
-            val view = settings.box(Specs.homeRevealView) ?: Specs.homeRevealView.default!!
-            Canvas(Modifier.fillMaxSize()) {
-                drawReveal(measurer, view, settings, effect.first.ifEmpty { "—" })
+            if (settings.unlockMode == UnlockMode.PATTERN) {
+                val view = settings.box(Specs.homePattern) ?: Specs.homePattern.default!!
+                Canvas(Modifier.fillMaxSize()) { drawPatternReveal(measurer, view, settings, effect.first) }
+            } else {
+                val view = settings.box(Specs.homeRevealView) ?: Specs.homeRevealView.default!!
+                Canvas(Modifier.fillMaxSize()) {
+                    drawReveal(measurer, view, settings, effect.first.ifEmpty { "—" })
+                }
             }
         }
     }

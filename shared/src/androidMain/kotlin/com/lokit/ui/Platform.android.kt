@@ -4,10 +4,13 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.BitmapFactory
+import android.os.VibrationEffect
+import android.os.Vibrator
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -28,6 +31,22 @@ actual fun SystemBarsEffect() {
         val c = WindowCompat.getInsetsController(window, view)
         c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         c.hide(WindowInsetsCompat.Type.systemBars())
+    }
+}
+
+/** Android: una vibración de 70 ms, o dos de 70 ms separadas por 90 ms. */
+@Composable
+actual fun rememberVibrator(): (Int) -> Unit {
+    val ctx = LocalContext.current
+    return remember(ctx) {
+        { times: Int ->
+            @Suppress("DEPRECATION")
+            val v = ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            if (v != null && v.hasVibrator()) {
+                val timings = if (times >= 2) longArrayOf(0, 70, 90, 70) else longArrayOf(0, 70)
+                v.vibrate(VibrationEffect.createWaveform(timings, -1))
+            }
+        }
     }
 }
 

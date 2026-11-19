@@ -49,6 +49,7 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private fun pct(v: Float) = "${(v * 100).roundToInt()} %"
+private fun pct1(v: Float) = "${(v * 1000).roundToInt() / 10.0} %"
 private fun secs(ms: Int) = "${ms / 1000}.${(ms % 1000) / 100} s"
 
 /** Fila «etiqueta  valor  [−] [+]». */
@@ -105,6 +106,13 @@ fun SettingsScreen(
     var editingHidden by remember { mutableStateOf(false) }
     val pick = rememberImagePicker { bytes -> target?.let { if (targetClean) onPickClean(it, bytes) else onPickImage(it, bytes) } }
 
+    var showInstructions by remember { mutableStateOf(false) }
+    var showGuide by remember { mutableStateOf(false) }
+    if (showInstructions) {
+        InstructionsScreen { showInstructions = false }
+        return
+    }
+
     val editId = editing
     if (editId != null || editingHidden) {
         BoxEditor(
@@ -132,11 +140,33 @@ fun SettingsScreen(
 
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Ayuda", fontSize = 16.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { showInstructions = true }) { Text("Instrucciones") }
+                    OutlinedButton(onClick = { showGuide = true }) { Text("Guía rápida") }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Switch(checked = settings.guideAtStart, onCheckedChange = { onSettings(settings.copy(guideAtStart = it)) })
+                    Text("Mostrar la guía rápida al abrir la app", fontSize = 14.sp)
+                }
+            }
+        }
+        if (showGuide) {
+            GuideDialog(showAtStart = settings.guideAtStart) { show ->
+                if (show != settings.guideAtStart) onSettings(settings.copy(guideAtStart = show))
+                showGuide = false
+            }
+        }
+
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Efecto", fontSize = 16.sp)
+                val what = if (settings.unlockMode == UnlockMode.PATTERN) "patrón" else "PIN"
+                val saved = Pattern.decode(effect.first)?.let { "patrón de ${it.second.size} puntos" } ?: effect.first
                 val status = when (effect.stage) {
-                    0 -> "Esperando el primer PIN del espectador (fallará y se guardará)."
-                    1 -> "PIN guardado: ${effect.first}. El siguiente PIN desbloquea."
-                    else -> "Desbloqueado. PIN guardado: ${effect.first}."
+                    0 -> "Esperando el primer $what del espectador (se guardará)."
+                    1 -> "Guardado: $saved. Fallos hasta ahora: ${effect.count} de ${settings.attempts - 1}; después desbloquea."
+                    else -> "Desbloqueado. Guardado: $saved."
                 }
                 Text(status, fontSize = 13.sp)
                 Text("Para reiniciar usa el botón oculto de reset (por defecto, esquina superior izquierda) o el de bloquear del escritorio.", fontSize = 12.sp, color = Color(0xFF9AA4B2))
@@ -145,11 +175,56 @@ fun SettingsScreen(
 
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Switch(checked = settings.askAtStart, onCheckedChange = { onSettings(settings.copy(askAtStart = it)) })
+                    Text("Preguntar al abrir la app (código o patrón)", fontSize = 14.sp)
+                }
+                Text("Tipo de desbloqueo", fontSize = 14.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (m in UnlockMode.entries) {
+                        FilterChip(
+                            selected = settings.unlockMode == m,
+                            onClick = { onSettings(settings.copy(unlockMode = m)) },
+                            label = { Text(m.label) },
+                        )
+                    }
+                }
+                if (settings.unlockMode == UnlockMode.PATTERN) {
+                    Stepper(
+                        "Rejilla", "${settings.patternGrid} × ${settings.patternGrid}",
+                        { if (settings.patternGrid > 3) onSettings(settings.copy(patternGrid = settings.patternGrid - 1, patternMin = settings.patternMin.coerceAtMost((settings.patternGrid - 1) * (settings.patternGrid - 1)))) },
+                        { if (settings.patternGrid < 5) onSettings(settings.copy(patternGrid = settings.patternGrid + 1)) },
+                    )
+                    Stepper(
+                        "Mínimo de puntos", "${settings.patternMin}",
+                        { if (settings.patternMin > 2) onSettings(settings.copy(patternMin = settings.patternMin - 1)) },
+                        { if (settings.patternMin < settings.patternGrid * settings.patternGrid) onSettings(settings.copy(patternMin = settings.patternMin + 1)) },
+                    )
+                    Text(
+                        "El patrón se valida al soltar el dedo, si tiene al menos ese número de puntos. " +
+                            "Colócalo y dale aspecto en «Pantalla de patrón» → «Cajas» → «Rejilla del patrón».",
+                        fontSize = 12.sp, color = Color(0xFF9AA4B2),
+                    )
+                } else {
                 Stepper(
-                    "Dígitos del PIN", "${settings.pinLength}",
-                    { if (settings.pinLength > 3) onSettings(settings.copy(pinLength = settings.pinLength - 1)) },
-                    { if (settings.pinLength < 10) onSettings(settings.copy(pinLength = settings.pinLength + 1)) },
+                    "Mínimo de dígitos para OK", "${settings.minDigits}",
+                    { if (settings.minDigits > 1) onSettings(settings.copy(minDigits = settings.minDigits - 1)) },
+                    // Subir el mínimo arrastra el máximo para que nunca quede por debajo.
+                    { if (settings.minDigits < 20) onSettings(settings.copy(minDigits = settings.minDigits + 1, maxDigits = maxOf(settings.maxDigits, settings.minDigits + 1))) },
                 )
+                Stepper(
+                    "Máximo de dígitos", "${settings.maxDigits}",
+                    { if (settings.maxDigits > settings.minDigits) onSettings(settings.copy(maxDigits = settings.maxDigits - 1)) },
+                    { if (settings.maxDigits < 20) onSettings(settings.copy(maxDigits = settings.maxDigits + 1)) },
+                )
+                Text("OK no hace nada hasta que se teclean al menos el mínimo; a partir del máximo, las teclas numéricas se ignoran.", fontSize = 12.sp, color = Color(0xFF9AA4B2))
+                }
+                Stepper(
+                    "Intentos del espectador", "${settings.attempts}",
+                    { if (settings.attempts > 1) onSettings(settings.copy(attempts = settings.attempts - 1)) },
+                    { if (settings.attempts < 10) onSettings(settings.copy(attempts = settings.attempts + 1)) },
+                )
+                Text("Los intentos anteriores al último fallan; el último desbloquea. Con 1, el primer intento ya desbloquea (y se guarda).", fontSize = 12.sp, color = Color(0xFF9AA4B2))
             }
         }
 
@@ -277,7 +352,8 @@ private fun BoxEditor(
     val masks = if (screenId != null) current.masksOf(screenId) else emptyList()
     val selMask = masks.firstOrNull { "m${it.id}" == selected }
     val spec = specs.firstOrNull { it.key == selected } ?: if (selMask == null) specs.first() else null
-    val isPad = screenId == ScreenId.PAD
+    val isPattern = screenId == ScreenId.PATTERN
+    val isPad = screenId == ScreenId.PAD // teclado de PIN (el patrón tiene su propio panel)
     val white = Color.White
 
     fun ents(): List<Ent> {
@@ -315,9 +391,22 @@ private fun BoxEditor(
                     Canvas(Modifier.fillMaxSize()) { drawPinDots(z, current, 3, 0f) }
                 }
             }
+            if (isPattern) {
+                current.box(Specs.padPattern)?.let { z ->
+                    MaskLayer(z, current.mask(Specs.padPattern), clean, null)
+                    val sample = listOf(0, 3, 4, 5, 8).filter { it < current.patternGrid * current.patternGrid }
+                    Canvas(Modifier.fillMaxSize()) { drawPatternPad(z, current, sample, null) }
+                }
+            }
             if (screenId == ScreenId.HOME && selected == Specs.homeRevealView.key) {
                 val view = current.box(Specs.homeRevealView) ?: Specs.homeRevealView.default!!
                 Canvas(Modifier.fillMaxSize()) { drawReveal(measurer, view, current, "427193") }
+            }
+            if (screenId == ScreenId.HOME && selected == Specs.homePattern.key) {
+                val view = current.box(Specs.homePattern) ?: Specs.homePattern.default!!
+                val n = current.patternGrid
+                val sample = Pattern.encode(n, listOf(0, n, n + 1, 1, 2, n + 2).filter { it < n * n })
+                Canvas(Modifier.fillMaxSize()) { drawPatternReveal(measurer, view, current, sample) }
             }
         }
 
@@ -525,13 +614,26 @@ private fun BoxEditor(
                         }
                     }
 
+                    // Rejilla del patrón: tamaño absoluto (no depende de la caja), separaciones y colores independientes.
+                    if (spec.key == Specs.padPattern.key) {
+                        Text("Tamaños en % de la altura de la pantalla: no cambian al mover o redimensionar la caja.", fontSize = 11.sp, color = Color(0xFFB0B8C4))
+                        SliderRow("Tamaño del punto", current.patternDot, 0.008f..0.1f, pct1(current.patternDot), { current = current.copy(patternDot = it) }, white)
+                        SliderRow("Separación horizontal", current.patternGapX, 0f..0.3f, pct1(current.patternGapX), { current = current.copy(patternGapX = it) }, white)
+                        SliderRow("Separación vertical", current.patternGapY, 0f..0.3f, pct1(current.patternGapY), { current = current.copy(patternGapY = it) }, white)
+                        SliderRow("Grosor de la línea", current.patternLine, 0.001f..0.03f, pct1(current.patternLine), { current = current.copy(patternLine = it) }, white)
+                        Text("Color de los puntos", fontSize = 12.sp, color = white)
+                        ColorChips(Palette.text, current.patternDotColor) { current = current.copy(patternDotColor = it) }
+                        Text("Color de la línea", fontSize = 12.sp, color = white)
+                        ColorChips(Palette.text, current.patternLineColor) { current = current.copy(patternLineColor = it) }
+                    }
                     // Puntos del PIN: tamaño, separación, borde y máscara.
                     if (spec.maskDefault != null && current.box(spec) != null) {
                         val st = current.mask(spec)
-                        SliderRow("Tamaño de los círculos", current.dotSize, 0.2f..1.5f, pct(current.dotSize), { current = current.copy(dotSize = it) }, white)
-                        SliderRow("Separación", current.dotGap, 0f..3f, pct(current.dotGap), { current = current.copy(dotGap = it) }, white)
-                        SliderRow("Grosor del borde", current.dotBorder, 0.05f..1f, pct(current.dotBorder), { current = current.copy(dotBorder = it) }, white)
-                        Text("Máscara: tapa lo que traiga la captura en esa zona (puntos o recuadro).", fontSize = 11.sp, color = Color(0xFFB0B8C4))
+                        if (spec.key == Specs.padDots.key) {
+                            SliderRow("Tamaño de los círculos", current.dotSize, 0.2f..1.5f, pct(current.dotSize), { current = current.copy(dotSize = it) }, white)
+                            SliderRow("Separación", current.dotGap, 0f..3f, pct(current.dotGap), { current = current.copy(dotGap = it) }, white)
+                        }
+                        Text("Máscara: tapa lo que traiga la captura en esa zona (puntos, recuadro o rejilla). Con «Imagen de fondo limpia» hace falta cargarla para esta pantalla.", fontSize = 11.sp, color = Color(0xFFB0B8C4))
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             for (m in BgMode.entries) {
                                 FilterChip(
@@ -544,9 +646,9 @@ private fun BoxEditor(
                     }
 
                     // PIN revelado: opacidad del fondo y color del número.
-                    if (spec.key == Specs.homeRevealView.key) {
+                    if (spec.key == Specs.homeRevealView.key || spec.key == Specs.homePattern.key) {
                         SliderRow("Opacidad del fondo", current.revealBgAlpha, 0f..1f, pct(current.revealBgAlpha), { current = current.copy(revealBgAlpha = it) }, white)
-                        Text("Color del número", fontSize = 12.sp, color = white)
+                        Text(if (spec.key == Specs.homePattern.key) "Color del patrón" else "Color del número", fontSize = 12.sp, color = white)
                         ColorChips(Palette.text, current.revealColor) { current = current.copy(revealColor = it) }
                     }
                 }

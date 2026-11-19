@@ -3,18 +3,11 @@
 App móvil para **Android y iOS** con un único código en Kotlin Multiplatform + Compose Multiplatform.
 El usuario habla español: responde y comenta el código en español.
 
-## Mapa de carpetas
-| Carpeta | Para qué sirve |
-|---|---|
-| `shared/` | Módulo KMP con TODO el código: lógica pura, interfaz Compose, ajustes. `commonMain` (común), `androidMain` / `iosMain` (solo lo del sistema, `expect`/`actual`), `commonTest` (tests). |
-| `app/` | Solo la envoltura Android (`MainActivity`, manifiesto, recursos, icono). |
-| `iosApp/` | Envoltura iOS en SwiftUI + `project.yml` (XcodeGen genera el `.xcodeproj` en CI; no se versiona). |
-| `.github/workflows/ios.yml` | Compila en un Mac de GitHub y publica un `.ipa` sin firmar. Solo `workflow_dispatch`. |
-| `docs/` | `ARQUITECTURA.md` (base técnica, fuente de verdad de versiones y reglas) y `SPEC.md` (especificación funcional, se crea al inicializar). |
-| `data/` | Material de referencia que aporta el usuario (capturas, icono, recursos). Se puede leer. |
-| `data/android_build/` | APK descargados/generados. No se versionan. |
-| `data/ios_build/` | `.ipa` descargado de Actions. No se versiona. |
-| `ignore/` | **Ignorar por completo** (ver reglas). |
+## Carpetas con reglas propias
+- `HANDOFF.md`: estado, pendientes y problemas abiertos; al retomar, leerlo primero.
+- `docs/`: `ARQUITECTURA.md` (fuente de verdad de versiones y reglas) y `SPEC.md` (especificación funcional).
+- `data/`: material de referencia que aporta el usuario (se puede leer); `data/icons/` es el origen del icono (ya aplicado a `app/src/main/res/mipmap-*` y a `iosApp/.../AppIcon-1024.png`); `data/android_build/` y `data/ios_build/` no se versionan.
+- `ignore/`: **ignorar por completo** (ver reglas).
 
 ## Reglas para Claude
 - **Ignorar por completo la carpeta `ignore/`**: no leerla, no listarla, no buscar dentro, no usarla como referencia. Excluirla
@@ -29,9 +22,26 @@ El usuario habla español: responde y comenta el código en español.
 
 ## Qué hace la app
 Efecto de magia: la app imita el móvil del mago (escritorio, bloqueo, teclado de PIN) con **capturas** y **cajas invisibles** configurables.
-El primer PIN que teclea el espectador falla y se guarda; los siguientes siempre desbloquean; una caja secreta del escritorio revela el PIN guardado.
-Botones ocultos por pulsación larga: Ajustes (esquina superior derecha) y reset (superior izquierda), con caja y duración configurables. Máscaras libres de hora/fecha reales (se añaden en el editor de cajas) y modo atenuado en el bloqueo; el PIN revelado se ve solo mientras se pulsa. Detalle en `docs/SPEC.md`. Paquete `com.lokit`.
-Código: `Model.kt` (cajas por tecla, lógica del efecto), `KeyFeedback.kt` (resalte de teclas), `Masks.kt` (reloj real, máscaras, puntos, PIN revelado), `App.kt` (móvil falso), `SettingsScreen.kt` (ajustes y editor de cajas), `Platform*.kt` (capturas, galería, ficheros).
+El PIN es de longitud variable: se valida con la tecla OK (mínimo configurable, por defecto 4; máximo, por defecto 12). El primer PIN que teclea el espectador se guarda; los `attempts-1` primeros fallan y el último desbloquea (por defecto 2); una caja secreta del escritorio revela el PIN guardado (solo mientras se pulsa).
+Alternativa al PIN: **patrón** (`AppSettings.unlockMode`; lógica en `Pattern.kt`, dibujo en `PatternDraw.kt`). Tiene su propia pantalla (`ScreenId.PATTERN`, con captura y fondo limpio propios): el espectador traza sobre una caja que tapa la rejilla de la captura y la app dibuja la suya con tamaño absoluto (la caja solo la centra), y el peek enseña el patrón pequeño con números y flechas. Se guarda como `n:p1,p2,…` en `EffectState.first`. Al abrir la app sale un modal para elegir PIN o patrón (`askAtStart`); cambiar de tipo reinicia el efecto. Vibración con `rememberVibrator()` (`expect/actual`): doble en botones ocultos, simple en fallo.
+Al abrir: guía rápida (`Guide.kt`, ilustraciones con Canvas) si `guideAtStart`, luego el modal de tipo de desbloqueo. Ajustes → «Instrucciones» (`Instructions.kt`) describe todos los ajustes: **al añadir o cambiar un ajuste, actualizar ese texto y, si procede, la guía**.
+Detalle funcional (R1–R17) en `docs/SPEC.md`. Paquete `com.lokit`. Estado y pendientes en `HANDOFF.md`.
+
+## Arquitectura
+Todo el código vive en `shared/src/commonMain/kotlin/com/lokit/ui/` (`Model.kt` y `SettingsStore.kt` con la lógica pura; `App.kt`, `Masks.kt`, `KeyFeedback.kt` y `SettingsScreen.kt` con la UI). Lo del sistema va con `expect/actual` en `Platform.kt` + `androidMain`/`iosMain`.
+
+## Decisiones estables
+- **Capturas a pantalla completa estiradas** (`FillBounds`); todas las cajas van normalizadas 0..1, así valen para cualquier resolución.
+- **Ajustes**: `AppSettings.overrides` solo guarda lo que el usuario cambia (null = caja desactivada); lo demás sale del `default` de `Specs`. Cada valor tiene su clave en `SettingsStore`; la marca `"default"` = sin override.
+- **Teclado**: una caja por tecla (rejilla 3×4 por defecto, editable). Los botones ocultos (Ajustes arriba-derecha, reset arriba-izquierda) son pulsación larga con duración configurable; «Bloquear» del escritorio también reinicia.
+- **Máscaras de hora/fecha**: libres (se añaden/eliminan en el editor, `AppSettings.masks` por pantalla, persistidas como `masks_<PANTALLA>` = `id#zona#estilo;…`). El **tamaño del texto es absoluto** (fracción de la altura de pantalla), no depende de la caja; la caja solo alinea. Fondo: transparente o **imagen limpia** (`ScreenId.cleanFile`: captura sin hora/fecha/iconos que el usuario carga por pantalla); se recorta el mismo trozo normalizado. Se probó y descartó rellenar automáticamente (clonar/degradado): no encajaba.
+- **Modo atenuado** (bloqueo): la captura y los fondos de máscara se desenfocan juntos (`Modifier.blur`, solo Android 12+ e iOS) y el texto real queda nítido encima.
+- **Datos solo locales**; formatos de almacenamiento antiguos se siguen leyendo (`MaskStyle.decode` acepta 6, 7 y 9 campos).
+
+## Convenciones
+- Comentarios y textos en español. Cambios de ajustes: añadir campo en `AppSettings` + carga/guardado en `SettingsStore` + test en `SettingsStoreTest`.
+- Lógica pura y testeable en `Model.kt`/`SettingsStore.kt`; la UI se verifica en el emulador con capturas.
+- Al cambiar de forma relevante la app, actualizar `docs/SPEC.md`, este fichero y `HANDOFF.md`.
 
 ## Reglas de código para que compile en iOS
 - En `commonMain`: nada de `java.*` ni `android.*`. Usar `kotlinx-datetime` (0.6.1), `kotlin.math.*` y, si hace falta aritmética
@@ -45,7 +55,7 @@ Código: `Model.kt` (cajas por tecla, lógica del efecto), `KeyFeedback.kt` (res
 - Con scripts: en esta máquina los heredocs de Bash con contenido complejo fallan; escribe los `.py` con la herramienta Write y ejecútalos.
 
 ## Compilar y probar (Windows)
-- Kotlin 2.0.21, Compose Multiplatform 1.7.1, AGP 8.7.3, Gradle 8.9, JDK 17, minSdk 26, target/compileSdk 35, iOS mínimo 15.0.
+- Versiones de Kotlin/Compose/AGP/Gradle y SDK: ver `docs/ARQUITECTURA.md` (JDK 17).
 - `JAVA_HOME` apunta al JDK 17: `C:\Program Files\Microsoft\jdk-17.0.21.21-hotspot`.
 - SDK de Android en `C:\Users\jmlop\AppData\Local\Android\Sdk`: crear `local.properties` con `sdk.dir=...` (ignorado por git).
 - `./gradlew.bat :shared:testDebugUnitTest assembleDebug` → APK en `app/build/outputs/apk/debug/app-debug.apk`.

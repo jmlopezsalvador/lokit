@@ -3,6 +3,9 @@ package com.lokit
 import com.lokit.ui.AppSettings
 import com.lokit.ui.EffectState
 import com.lokit.ui.KeyHit
+import com.lokit.ui.Pattern
+import com.lokit.ui.patternGeometry
+import com.lokit.ui.UnlockMode
 import com.lokit.ui.KeyValueStore
 import com.lokit.ui.SettingsStore
 import com.lokit.ui.Specs
@@ -34,7 +37,8 @@ class SettingsStoreTest {
 
     @Test fun defaultsWhenEmpty() {
         val s = SettingsStore(MemoryStore()).load()
-        assertEquals(6, s.pinLength)
+        assertEquals(4, s.minDigits)
+        assertEquals(12, s.maxDigits)
         assertEquals(Specs.keys.first { it.key == "key5" }.default, s.box(Specs.keys.first { it.key == "key5" }))
         assertNull(s.box(Specs.padBack))
     }
@@ -42,13 +46,14 @@ class SettingsStoreTest {
     @Test fun savesAndLoadsBoxesAndPin() {
         val store = SettingsStore(MemoryStore())
         val z = Zone(0.1f, 0.2f, 0.3f, 0.4f)
-        val s = AppSettings(pinLength = 4)
+        val s = AppSettings(minDigits = 5, maxDigits = 9)
             .withBox(Specs.keys.first { it.key == "key5" }.key, z)
             .withBox(Specs.padDots.key, null)
             .withBox(Specs.padBack.key, Zone(0f, 0f, 0.1f, 0.1f))
         store.save(s)
         val back = store.load()
-        assertEquals(4, back.pinLength)
+        assertEquals(5, back.minDigits)
+        assertEquals(9, back.maxDigits)
         assertEquals(z, back.box(Specs.keys.first { it.key == "key5" }))
         assertNull(back.box(Specs.padDots))
         assertEquals(Zone(0f, 0f, 0.1f, 0.1f), back.box(Specs.padBack))
@@ -72,8 +77,105 @@ class SettingsStoreTest {
 
     @Test fun effectPersists() {
         val store = SettingsStore(MemoryStore())
-        store.saveEffect(EffectState(1, "4321"))
-        assertEquals(EffectState(1, "4321"), store.loadEffect())
+        store.saveEffect(EffectState(1, "4321", 2))
+        assertEquals(EffectState(1, "4321", 2), store.loadEffect())
+    }
+
+    @Test fun effectWithThreeAttempts() {
+        val (e1, ok1) = EffectState().submit("1111", 3)
+        assertFalse(ok1)
+        val (e2, ok2) = e1.submit("2222", 3)
+        assertFalse(ok2)
+        val (e3, ok3) = e2.submit("3333", 3)
+        assertTrue(ok3)
+        assertEquals("1111", e3.first)
+    }
+
+    @Test fun effectWithOneAttemptUnlocksAndSaves() {
+        val (e, ok) = EffectState().submit("5555", 1)
+        assertTrue(ok)
+        assertEquals("5555", e.first)
+    }
+
+    @Test fun patternEncodeDecode() {
+        assertEquals(3 to listOf(0, 1, 4, 8), Pattern.decode(Pattern.encode(3, listOf(0, 1, 4, 8))))
+        assertNull(Pattern.decode("1234"))
+        assertNull(Pattern.decode("3:0,9")) // fuera de la rejilla
+    }
+
+    @Test fun patternIncludesIntermediateNodes() {
+        // De 0 a 2 pasa por el 1; de 0 a 8 (diagonal) pasa por el 4.
+        assertEquals(listOf(0, 1, 2), Pattern.extend(listOf(0), 2, 3))
+        assertEquals(listOf(0, 4, 8), Pattern.extend(listOf(0), 8, 3))
+        // Si el intermedio ya estaba visitado, no se repite; un punto repetido se ignora.
+        assertEquals(listOf(1, 0, 2), Pattern.extend(listOf(1, 0), 2, 3))
+        assertEquals(listOf(0, 1), Pattern.extend(listOf(0, 1), 0, 3))
+        // Movimiento de caballo: sin intermedios.
+        assertEquals(listOf(0, 5), Pattern.extend(listOf(0), 5, 3))
+    }
+
+    @Test fun patternGeometryIgnoresBoxSize() {
+        val s = AppSettings(patternDot = 0.03f, patternGapX = 0.05f, patternGapY = 0.1f)
+        // Pantalla 1000x2000: punto = 60 px, paso horizontal 160 px, vertical 260 px.
+        val big = patternGeometry(s, Zone(0f, 0f, 1f, 1f), 1000f, 2000f)
+        val small = patternGeometry(s, Zone(0.4f, 0.4f, 0.2f, 0.2f), 1000f, 2000f) // misma posición central, otra forma
+        assertEquals(160f, big.stepX)
+        assertEquals(260f, big.stepY)
+        assertEquals(big.cx(0), small.cx(0))
+        assertEquals(big.cy(8), small.cy(8))
+        // Centro de la rejilla = centro de la caja; el punto 4 es el del medio.
+        assertEquals(500f, big.cx(4))
+        assertEquals(1000f, big.cy(4))
+        assertEquals(4, big.nodeAt(505f, 995f))
+        assertEquals(0, big.nodeAt(big.cx(0), big.cy(0)))
+        assertEquals(-1, big.nodeAt(big.cx(0) + 80f, big.cy(0) + 130f)) // entre puntos
+        assertEquals(-1, big.nodeAt(5f, 5f))
+    }
+
+    @Test fun patternSettingsPersist() {
+        val store = SettingsStore(MemoryStore())
+        store.save(
+            AppSettings(
+                unlockMode = UnlockMode.PATTERN, patternGrid = 4, patternMin = 6, patternDot = 0.04f,
+                patternGapX = 0.05f, patternGapY = 0.07f, patternLine = 0.01f,
+                patternDotColor = 0xFF112233L, patternLineColor = 0xFF445566L, askAtStart = false,
+            ),
+        )
+        val back = store.load()
+        assertEquals(UnlockMode.PATTERN, back.unlockMode)
+        assertEquals(4, back.patternGrid)
+        assertEquals(6, back.patternMin)
+        assertEquals(0.04f, back.patternDot)
+        assertEquals(0.05f, back.patternGapX)
+        assertEquals(0.07f, back.patternGapY)
+        assertEquals(0.01f, back.patternLine)
+        assertEquals(0xFF112233L, back.patternDotColor)
+        assertEquals(0xFF445566L, back.patternLineColor) // color de línea independiente del de los puntos
+        assertFalse(back.askAtStart)
+        assertTrue(AppSettings().askAtStart)
+        assertEquals(Specs.padPattern.default, back.box(Specs.padPattern))
+    }
+
+    @Test fun patternGoesThroughEffect() {
+        val p = Pattern.encode(3, listOf(0, 1, 2, 5))
+        val (e1, ok1) = EffectState().submit(p, 2)
+        assertFalse(ok1)
+        val (e2, ok2) = e1.submit(Pattern.encode(3, listOf(6, 7, 8, 5)), 2)
+        assertTrue(ok2)
+        assertEquals(p, e2.first)
+    }
+
+    @Test fun guideAtStartPersists() {
+        assertTrue(AppSettings().guideAtStart) // sale la primera vez
+        val store = SettingsStore(MemoryStore())
+        store.save(AppSettings(guideAtStart = false))
+        assertFalse(store.load().guideAtStart)
+    }
+
+    @Test fun attemptsPersist() {
+        val store = SettingsStore(MemoryStore())
+        store.save(AppSettings(attempts = 4))
+        assertEquals(4, store.load().attempts)
     }
 
     @Test fun keypadDefaultGrid() {
@@ -83,7 +185,7 @@ class SettingsStoreTest {
         assertEquals(KeyHit.Digit('9'), hitKey(st, 0.78f, 0.76f)?.first)
         assertEquals(KeyHit.Digit('0'), hitKey(st, 0.5f, 0.89f)?.first)
         assertEquals(KeyHit.Delete, hitKey(st, 0.78f, 0.89f)?.first)
-        assertNull(hitKey(st, 0.22f, 0.89f))
+        assertEquals(KeyHit.Ok, hitKey(st, 0.22f, 0.89f)?.first)
         assertNull(hitKey(st, 0.5f, 0.1f))
     }
 

@@ -43,8 +43,22 @@ class SettingsStore(private val prefs: KeyValueStore) {
         }
         val d = AppSettings()
         val style = FeedbackStyle.entries.firstOrNull { it.name == prefs.getString("fbStyle") } ?: d.fbStyle
+        val grid = int("patternGrid", d.patternGrid, 3, 5)
         return AppSettings(
-            pinLength = int("pinLength", d.pinLength, 3, 10),
+            unlockMode = UnlockMode.entries.firstOrNull { it.name == prefs.getString("unlockMode") } ?: d.unlockMode,
+            patternGrid = grid,
+            patternMin = int("patternMin", d.patternMin, 2, 25).coerceAtMost(grid * grid),
+            patternDot = float("patDot", d.patternDot, 0.008f, 0.1f),
+            patternGapX = float("patGapX", d.patternGapX, 0f, 0.3f),
+            patternGapY = float("patGapY", d.patternGapY, 0f, 0.3f),
+            patternLine = float("patLine", d.patternLine, 0.001f, 0.03f),
+            patternDotColor = prefs.getLong("patDotColor", d.patternDotColor),
+            patternLineColor = prefs.getLong("patLineColor", d.patternLineColor),
+            askAtStart = prefs.getBoolean("askAtStart", d.askAtStart),
+            guideAtStart = prefs.getBoolean("guideAtStart", d.guideAtStart),
+            minDigits = int("minDigits", d.minDigits, 1, 20),
+            maxDigits = int("maxDigits", d.maxDigits, int("minDigits", d.minDigits, 1, 20), 20),
+            attempts = int("attempts", d.attempts, 1, 10),
             overrides = overrides,
             maskOverrides = masks,
             masks = screenMasks,
@@ -67,7 +81,20 @@ class SettingsStore(private val prefs: KeyValueStore) {
     }
 
     fun save(s: AppSettings) {
-        prefs.putLong("pinLength", s.pinLength.toLong())
+        prefs.putString("unlockMode", s.unlockMode.name)
+        prefs.putLong("patternGrid", s.patternGrid.toLong())
+        prefs.putLong("patternMin", s.patternMin.toLong())
+        prefs.putString("patDot", s.patternDot.toString())
+        prefs.putString("patGapX", s.patternGapX.toString())
+        prefs.putString("patGapY", s.patternGapY.toString())
+        prefs.putString("patLine", s.patternLine.toString())
+        prefs.putLong("patDotColor", s.patternDotColor)
+        prefs.putLong("patLineColor", s.patternLineColor)
+        prefs.putBoolean("askAtStart", s.askAtStart)
+        prefs.putBoolean("guideAtStart", s.guideAtStart)
+        prefs.putLong("minDigits", s.minDigits.toLong())
+        prefs.putLong("maxDigits", s.maxDigits.toLong())
+        prefs.putLong("attempts", s.attempts.toLong())
         prefs.putString("fbStyle", s.fbStyle.name)
         prefs.putBoolean("fbLight", s.fbLight)
         prefs.putLong("fbTint", s.fbTint)
@@ -91,10 +118,16 @@ class SettingsStore(private val prefs: KeyValueStore) {
         }
     }
 
-    fun loadEffect() = EffectState(prefs.getLong("stage", 0L).toInt(), prefs.getString("firstPin") ?: "")
+    fun loadEffect(): EffectState {
+        val stage = prefs.getLong("stage", 0L).toInt()
+        // Estados guardados por versiones anteriores no tenían contador: en curso = 1 fallo.
+        val count = prefs.getLong("tries", if (stage == 1) 1L else 0L).toInt()
+        return EffectState(stage, prefs.getString("firstPin") ?: "", count)
+    }
 
     fun saveEffect(e: EffectState) {
         prefs.putLong("stage", e.stage.toLong())
+        prefs.putLong("tries", e.count.toLong())
         prefs.putString("firstPin", e.first)
     }
 
@@ -103,7 +136,7 @@ class SettingsStore(private val prefs: KeyValueStore) {
         val prefix = id.name.lowercase()
         val kinds = when (id) {
             ScreenId.LOCK -> listOf(MaskKind.TIME_STACKED, MaskKind.DATE, MaskKind.TIME_NOZERO)
-            ScreenId.PAD -> listOf(MaskKind.TIME_NOZERO, MaskKind.TIME, MaskKind.DATE)
+            ScreenId.PAD, ScreenId.PATTERN -> listOf(MaskKind.TIME_NOZERO, MaskKind.TIME, MaskKind.DATE)
             ScreenId.HOME -> listOf(MaskKind.DATE, MaskKind.TIME_NOZERO, MaskKind.TIME)
         }
         return kinds.mapIndexedNotNull { i, kind ->

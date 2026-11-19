@@ -113,25 +113,30 @@ fun MaskLayer(zone: Zone, style: MaskStyle, clean: ImageBitmap?, lines: List<Str
     }
 }
 
-/** Puntos del PIN: `filled` rellenos y el resto como anillos, con tamaño, separación y borde configurables. */
+/**
+ * Puntos del PIN: uno por dígito tecleado, centrados en la caja y sin huecos vacíos (el PIN no tiene máximo).
+ * Con tamaño y separación configurables; si no caben en la caja, se encogen.
+ */
 fun DrawScope.drawPinDots(zone: Zone, s: AppSettings, filled: Int, shakePx: Float) {
-    val n = s.pinLength
+    if (filled <= 0) return
     val left = zone.x * size.width
     val top = zone.y * size.height
     val w = zone.w * size.width
     val h = zone.h * size.height
-    val d = h * s.dotSize
+    var d = h * s.dotSize
+    var gap = d * s.dotGap
+    val total = filled * d + (filled - 1) * gap
+    if (total > w) {
+        val k = w / total
+        d *= k
+        gap *= k
+    }
     val r = d / 2f
-    val gap = d * s.dotGap
-    val total = n * d + (n - 1) * gap
-    val startX = left + (w - total) / 2f + r
+    val startX = left + (w - (filled * d + (filled - 1) * gap)) / 2f + r
     // Oscuros sobre teclados claros, claros sobre teclados oscuros.
     val dot = if (s.fbLight) Color.White else Color(0xFF1B1C18)
-    val stroke = r * s.dotBorder
-    for (i in 0 until n) {
-        val c = Offset(startX + i * (d + gap) + shakePx, top + h / 2f)
-        if (i < filled) drawCircle(dot, r, c)
-        else drawCircle(dot.copy(alpha = 0.35f), (r - stroke / 2f).coerceAtLeast(1f), c, style = Stroke(width = stroke))
+    for (i in 0 until filled) {
+        drawCircle(dot, r, Offset(startX + i * (d + gap) + shakePx, top + h / 2f))
     }
 }
 

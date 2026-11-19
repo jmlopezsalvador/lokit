@@ -4,7 +4,10 @@ package com.lokit.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -26,6 +29,8 @@ import platform.PhotosUI.PHPickerViewController
 import platform.PhotosUI.PHPickerViewControllerDelegateProtocol
 import platform.UIKit.UIApplication
 import platform.UIKit.UIImage
+import platform.UIKit.UIImpactFeedbackGenerator
+import platform.UIKit.UIImpactFeedbackStyle
 import platform.UIKit.UIImagePNGRepresentation
 import platform.UIKit.UIViewController
 import platform.darwin.NSObject
@@ -36,6 +41,25 @@ import platform.posix.memcpy
 /** iOS: la barra de estado y el indicador de inicio se ocultan en ContentView.swift. */
 @Composable
 actual fun SystemBarsEffect() {}
+
+/** iOS: golpe háptico fuerte; dos con 160 ms de separación para la doble vibración. */
+@Composable
+actual fun rememberVibrator(): (Int) -> Unit {
+    val scope = rememberCoroutineScope()
+    return remember {
+        { times: Int ->
+            scope.launch {
+                val generator = UIImpactFeedbackGenerator(style = UIImpactFeedbackStyle.UIImpactFeedbackStyleHeavy)
+                generator.impactOccurred()
+                if (times >= 2) {
+                    delay(160)
+                    generator.impactOccurred()
+                }
+            }
+            Unit
+        }
+    }
+}
 
 actual fun decodeImage(bytes: ByteArray): ImageBitmap? =
     try {

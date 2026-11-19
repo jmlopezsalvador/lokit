@@ -21,6 +21,7 @@ data class Zone(val x: Float, val y: Float, val w: Float, val h: Float) {
 enum class ScreenId(val title: String, val file: String, val cleanFile: String) {
     LOCK("Pantalla de bloqueo", "lock.img", "lock_clean.img"),
     PAD("Teclado de PIN", "pad.img", "pad_clean.img"),
+    PATTERN("Pantalla de patrón", "pattern.img", "pattern_clean.img"),
     HOME("Escritorio", "home.img", "home_clean.img"),
 }
 
@@ -117,6 +118,8 @@ class BoxSpec(
 sealed interface KeyHit {
     data class Digit(val d: Char) : KeyHit
     data object Delete : KeyHit
+    /** Tecla «OK»: ejecuta el intento con lo tecleado. */
+    data object Ok : KeyHit
 }
 
 object Specs {
@@ -134,13 +137,21 @@ object Specs {
         val i = d - '1'
         BoxSpec("key$d", "Tecla $d", "Caja de la tecla $d.", gridZone(i / 3, i % 3), false, "$d")
     } + BoxSpec("key0", "Tecla 0", "Caja de la tecla 0.", gridZone(3, 1), false, "0") +
-        BoxSpec("keyDel", "Borrar", "Caja de la tecla de borrar. Desactívala si no existe en tu teclado.", gridZone(3, 2), true, "⌫")
+        BoxSpec("keyDel", "Borrar", "Caja de la tecla de borrar. Desactívala si no existe en tu teclado.", gridZone(3, 2), true, "⌫") +
+        BoxSpec("keyOk", "OK", "Caja de la tecla OK: al pulsarla se ejecuta el intento (si ya hay el mínimo de dígitos).", gridZone(3, 0), false, "OK")
 
     val padDots = BoxSpec(
         "padDots", "Puntos del PIN",
         "Zona donde se dibujan los puntos al teclear. Si activas la máscara, tapa los puntos o el recuadro que trae la captura.",
         Zone(0.25f, 0.22f, 0.5f, 0.04f), true, "•••",
         maskDefault = MaskStyle(bgMode = BgMode.NONE),
+    )
+    /** Modo patrón: aquí se dibuja la rejilla de puntos. La máscara tapa la rejilla que trae la captura. */
+    val padPattern = BoxSpec(
+        "padPattern", "Rejilla del patrón",
+        "Zona donde el espectador dibuja el patrón. La caja solo marca el centro y la zona táctil: el tamaño y la forma de la rejilla se ajustan abajo, no con la caja. La máscara tapa la rejilla de la captura (necesita la imagen de fondo limpia de esta pantalla).",
+        Zone(0.1f, 0.4f, 0.8f, 0.45f), false, "patrón",
+        maskDefault = MaskStyle(bgMode = BgMode.IMAGE),
     )
     val padBack = BoxSpec(
         "padBack", "Atrás / Cancelar",
@@ -156,6 +167,12 @@ object Specs {
         "homeRevealView", "Posición del número",
         "Dónde se dibuja el PIN revelado. El texto se ajusta al tamaño de la caja.",
         Zone(0.1f, 0.42f, 0.8f, 0.14f), false, "123456",
+    )
+    /** Modo patrón: caja donde se enseña, pequeño, el patrón guardado (con líneas, flechas y orden). */
+    val homePattern = BoxSpec(
+        "homePattern", "Patrón revelado",
+        "Dónde se dibuja el patrón guardado mientras mantienes pulsada la zona secreta: puntos numerados por orden, con líneas y flechas de dirección. Se ajusta como un cuadrado dentro de la caja.",
+        Zone(0.3f, 0.4f, 0.4f, 0.2f), false, "patrón",
     )
     val homeLock = BoxSpec(
         "homeLock", "Bloquear y reiniciar",
@@ -176,16 +193,19 @@ object Specs {
     )
     val hidden = listOf(settingsBox, resetBox)
 
+    /** Cajas editables de una pantalla. */
     fun forScreen(id: ScreenId): List<BoxSpec> = when (id) {
         ScreenId.LOCK -> listOf(lockOpen)
         ScreenId.PAD -> keys + listOf(padDots, padBack)
-        ScreenId.HOME -> listOf(homeReveal, homeRevealView, homeLock)
+        ScreenId.PATTERN -> listOf(padPattern, padBack)
+        ScreenId.HOME -> listOf(homeReveal, homeRevealView, homePattern, homeLock)
     }
 
-    val all: List<BoxSpec> = ScreenId.entries.flatMap { forScreen(it) } + hidden
+    val all: List<BoxSpec> = ScreenId.entries.flatMap { forScreen(it) }.distinctBy { it.key } + hidden
 
     fun hitOf(spec: BoxSpec): KeyHit? = when {
         spec.key == "keyDel" -> KeyHit.Delete
+        spec.key == "keyOk" -> KeyHit.Ok
         spec.key.startsWith("key") -> KeyHit.Digit(spec.key.last())
         else -> null
     }
@@ -206,7 +226,28 @@ enum class FeedbackStyle(val label: String) {
  * `fbLight`: resalte claro (para teclados sobre fondo oscuro); si es falso, resalte oscuro (teclado claro).
  */
 data class AppSettings(
-    val pinLength: Int = 6,
+    val unlockMode: UnlockMode = UnlockMode.PIN,
+    // Modo patrón: rejilla de `patternGrid × patternGrid` puntos; `patternMin` puntos mínimos para validar al soltar el dedo.
+    val patternGrid: Int = 3,
+    val patternMin: Int = 4,
+    // Dibujo del patrón (tamaños absolutos, como fracción de la altura de la pantalla; la caja NO los escala):
+    // diámetro del punto, separación horizontal y vertical entre puntos y grosor de la línea; colores independientes.
+    val patternDot: Float = 0.026f,
+    val patternGapX: Float = 0.094f,
+    val patternGapY: Float = 0.094f,
+    val patternLine: Float = 0.008f,
+    val patternDotColor: Long = 0xFFFFFFFFL,
+    val patternLineColor: Long = 0xFFFFFFFFL,
+    /** Al abrir la app, preguntar primero si se usa código o patrón. */
+    val askAtStart: Boolean = true,
+    /** Mostrar la guía rápida al abrir la app (activa por defecto: sale la primera vez hasta que se desactiva). */
+    val guideAtStart: Boolean = true,
+    /** Mínimo de dígitos que hay que teclear para que la tecla OK ejecute el intento. */
+    val minDigits: Int = 4,
+    /** Máximo de dígitos que se admiten; los que sobren se ignoran. Siempre >= `minDigits`. */
+    val maxDigits: Int = 12,
+    /** Intentos que tiene el espectador: los anteriores al último fallan y el último desbloquea. */
+    val attempts: Int = 2,
     val overrides: Map<String, Zone?> = emptyMap(),
     val maskOverrides: Map<String, MaskStyle> = emptyMap(),
     /** Máscaras de hora/fecha que el usuario añade a cada pantalla. */
@@ -259,13 +300,18 @@ fun hitKey(settings: AppSettings, px: Float, py: Float): Pair<KeyHit, Zone>? {
 }
 
 /**
- * Estado del efecto. stage 0: nada tecleado aún (el primer PIN falla y se guarda).
- * stage 1: el siguiente PIN, sea cual sea, desbloquea. stage 2: ya desbloqueado (siempre desbloquea).
+ * Estado del efecto. stage 0: nada tecleado aún (el primer PIN se guarda).
+ * stage 1: en curso, `count` intentos ya fallados. stage 2: ya desbloqueado (siempre desbloquea).
+ * Con `attempts` intentos, los `attempts - 1` primeros fallan y el último desbloquea (con 1, el primero ya desbloquea).
  */
-data class EffectState(val stage: Int = 0, val first: String = "") {
+data class EffectState(val stage: Int = 0, val first: String = "", val count: Int = 0) {
     /** Devuelve el nuevo estado y si el PIN desbloquea. */
-    fun submit(pin: String): Pair<EffectState, Boolean> =
-        if (stage == 0) EffectState(1, pin) to false else EffectState(2, first) to true
+    fun submit(pin: String, attempts: Int = 2): Pair<EffectState, Boolean> = when {
+        stage >= 2 -> EffectState(2, first, count) to true
+        stage == 0 -> if (attempts <= 1) EffectState(2, pin, 1) to true else EffectState(1, pin, 1) to false
+        count + 1 >= attempts -> EffectState(2, first, count + 1) to true
+        else -> EffectState(1, first, count + 1) to false
+    }
 }
 
 private val dayNames = listOf("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
